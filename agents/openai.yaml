@@ -1,0 +1,4 @@
+interface:
+  display_name: "Persona.skill"
+  short_description: "把人物资料蒸馏成可创建、验证、启停的完整角色人格 Skill"
+  default_prompt: "Use $persona to create a private role-playing persona skill from my materials."

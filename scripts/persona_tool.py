@@ -1,0 +1,534 @@
+#!/usr/bin/env python3
+"""Create and statically validate Persona.skill character skill folders."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import sys
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Iterable
+
+
+SKILL_ROOT = Path(__file__).resolve().parents[1]
+TEMPLATE_ROOT = SKILL_ROOT / "assets" / "角色人格模板"
+SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+FRONTMATTER_RE = re.compile(r"\A---\s*\r?\n(.*?)\r?\n---\s*\r?\n", re.DOTALL)
+CARD_HEADING_RE = re.compile(
+    r"^##\s+([A-Z0-9][A-Z0-9-]*-\d{4})\s*$", re.MULTILINE | re.IGNORECASE
+)
+SCENE_HEADING_RE = re.compile(r"^##\s+([a-z][a-z-]*)\s+\|", re.MULTILINE)
+CASE_HEADING_RE = re.compile(r"^##\s+CASE-\d{2}\s+\|", re.MULTILINE)
+SOURCE_HEADING_RE = re.compile(r"^##\s+(SRC-\d{4})\s*$", re.MULTILINE | re.IGNORECASE)
+PLACEHOLDER_RE = re.compile(
+    r"\{\{[A-Z0-9_]+\}\}|\[待填写[^\]]*\]|\b(?:TODO|TBD)\b", re.IGNORECASE
+)
+
+REQUIRED_FILES = (
+    "SKILL.md",
+    "agents/openai.yaml",
+    "references/01-角色核心.md",
+    "references/02-语言声纹.md",
+    "references/03-情绪与关系.md",
+    "references/04-工作场景迁移.md",
+    "references/05-对白索引.md",
+    "references/07-验证用例.md",
+    "references/08-来源索引.md",
+)
+
+REQUIRED_CARD_FIELDS = (
+    "检索标签",
+    "来源类型",
+    "来源位置",
+    "原场景",
+    "对话对象",
+    "关系距离",
+    "交流目的",
+    "主要情绪",
+    "情绪强度",
+    "语言特征",
+    "代表性短句",
+    "表达结构",
+    "适用工作场景",
+    "迁移方式",
+    "工作改写示例",
+    "不适用场景",
+    "重复限制",
+)
+
+ALLOWED_SOURCE_TYPES = {"原作明确", "用户补充", "合理推导", "Persona.skill 补齐"}
+ALLOWED_MIGRATIONS = {"直接使用", "修改后使用", "仅作风格参考"}
+REQUIRED_TAGS = {"task_state", "user_state", "emotion", "intent", "relation", "risk", "language"}
+
+REQUIRED_SCENES = {
+    "start",
+    "clarify",
+    "progress",
+    "waiting",
+    "issue",
+    "failed",
+    "mistake",
+    "tired",
+    "disagree",
+    "risk",
+    "decision",
+    "blocked",
+    "milestone",
+    "complete",
+    "close",
+}
+
+REQUIRED_SKILL_TERMS = ("每轮加载", "对白使用", "事实保护", "停用与恢复")
+REQUIRED_CORE_TERMS = ("身份", "人格内核", "与用户的关系", "基本声纹", "工作边界")
+TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".txt", ".json"}
+
+
+@dataclass(frozen=True)
+class Issue:
+    severity: str
+    code: str
+    message: str
+    file: str | None = None
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8-sig")
+
+
+def parse_frontmatter(text: str) -> tuple[dict[str, str], str | None]:
+    match = FRONTMATTER_RE.search(text)
+    if not match:
+        return {}, "缺少以 --- 包围的 YAML frontmatter"
+    values: dict[str, str] = {}
+    for raw_line in match.group(1).splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if ":" not in line:
+            return {}, f"无法解析 frontmatter 行：{raw_line}"
+        key, value = line.split(":", 1)
+        values[key.strip()] = value.strip().strip('"\'')
+    return values, None
+
+
+def card_prefix(slug: str) -> str:
+    value = re.sub(r"[^A-Z0-9]", "", slug.upper())[:12]
+    return value or "ROLE"
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    if not SLUG_RE.fullmatch(args.slug) or len(args.slug) >= 64:
+        print("错误：slug 只能包含小写字母、数字和单个连字符，且必须少于 64 字符。", file=sys.stderr)
+        return 2
+
+    target = Path(args.output).expanduser().resolve()
+    if target.exists():
+        print(f"错误：目标已存在，拒绝覆盖：{target}", file=sys.stderr)
+        return 2
+    if not TEMPLATE_ROOT.is_dir():
+        print(f"错误：找不到角色人格模板：{TEMPLATE_ROOT}", file=sys.stderr)
+        return 2
+
+    replacements = {
+        "{{PERSONA_NAME}}": args.name.strip(),
+        "{{PERSONA_SLUG}}": args.slug,
+        "{{CARD_PREFIX}}": card_prefix(args.slug),
+    }
+    if not replacements["{{PERSONA_NAME}}"]:
+        print("错误：name 不能为空。", file=sys.stderr)
+        return 2
+
+    created = False
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(TEMPLATE_ROOT, target)
+        created = True
+        for path in target.rglob("*"):
+            if path.is_file() and path.suffix.lower() in TEXT_SUFFIXES:
+                text = read_text(path)
+                for old, new in replacements.items():
+                    text = text.replace(old, new)
+                with path.open("w", encoding="utf-8", newline="\n") as handle:
+                    handle.write(text)
+    except Exception as exc:  # pragma: no cover - cleanup path is environment-specific
+        if created and target.exists():
+            shutil.rmtree(target)
+        print(f"错误：创建失败：{exc}", file=sys.stderr)
+        return 1
+
+    print(f"已创建角色人格 Skill 草稿：{target}")
+    print("下一步：填写全部 [待填写] 内容，扩充对白卡片，然后运行 release 校验。")
+    return 0
+
+
+def add_issue(
+    issues: list[Issue], severity: str, code: str, message: str, path: Path | None, root: Path
+) -> None:
+    file_value: str | None = None
+    if path is not None:
+        try:
+            file_value = path.relative_to(root).as_posix()
+        except ValueError:
+            file_value = str(path)
+    issues.append(Issue(severity, code, message, file_value))
+
+
+def placeholder_severity(level: str) -> str:
+    return "error" if level == "release" else "warning"
+
+
+def split_values(value: str) -> set[str]:
+    values = re.split(r"[/,，;；、|]", value)
+    return {item.strip().lower() for item in values if item.strip() and "待填写" not in item}
+
+
+def field_value(block: str, field: str) -> str | None:
+    match = re.search(rf"^-\s*{re.escape(field)}[：:]\s*(.+?)\s*$", block, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def iter_card_blocks(text: str) -> Iterable[tuple[str, str]]:
+    matches = list(CARD_HEADING_RE.finditer(text))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        yield match.group(1).upper(), text[match.end() : end]
+
+
+def validate_skill(root: Path, level: str) -> dict[str, object]:
+    issues: list[Issue] = []
+    metrics = {
+        "cards": 0,
+        "distinct_emotions_and_intents": 0,
+        "work_scenes": 0,
+        "validation_cases": 0,
+        "sources": 0,
+    }
+
+    if not root.is_dir():
+        add_issue(issues, "error", "path.not_directory", "目标不是目录或不存在", root, root)
+        return {"valid": False, "level": level, "path": str(root), "metrics": metrics, "issues": [asdict(x) for x in issues]}
+
+    for relative in REQUIRED_FILES:
+        path = root / relative
+        if not path.is_file():
+            add_issue(issues, "error", "file.missing", f"缺少必要文件：{relative}", path, root)
+
+    skill_path = root / "SKILL.md"
+    if skill_path.is_file():
+        skill_text = read_text(skill_path)
+        metadata, metadata_error = parse_frontmatter(skill_text)
+        if metadata_error:
+            add_issue(issues, "error", "frontmatter.invalid", metadata_error, skill_path, root)
+        else:
+            keys = set(metadata)
+            if keys != {"name", "description"}:
+                add_issue(
+                    issues,
+                    "error",
+                    "frontmatter.keys",
+                    "frontmatter 必须且只能包含 name 和 description",
+                    skill_path,
+                    root,
+                )
+            name = metadata.get("name", "")
+            if not SLUG_RE.fullmatch(name) or len(name) >= 64:
+                add_issue(issues, "error", "frontmatter.name", "name 必须是少于 64 字符的小写连字符标识", skill_path, root)
+            if not metadata.get("description", "").strip():
+                add_issue(issues, "error", "frontmatter.description", "description 不能为空", skill_path, root)
+        for term in REQUIRED_SKILL_TERMS:
+            if term not in skill_text:
+                add_issue(issues, "error", "skill.section_missing", f"SKILL.md 缺少运行章节：{term}", skill_path, root)
+
+    core_path = root / "references" / "01-角色核心.md"
+    if core_path.is_file():
+        core_text = read_text(core_path)
+        for term in REQUIRED_CORE_TERMS:
+            if term not in core_text:
+                add_issue(issues, "error", "core.section_missing", f"角色核心缺少章节：{term}", core_path, root)
+
+    all_text_paths = [path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in TEXT_SUFFIXES]
+    placeholder_count = 0
+    for path in all_text_paths:
+        text = read_text(path)
+        count = len(PLACEHOLDER_RE.findall(text))
+        if count:
+            placeholder_count += count
+            add_issue(
+                issues,
+                placeholder_severity(level),
+                "content.placeholder",
+                f"仍有 {count} 个模板占位符",
+                path,
+                root,
+            )
+
+    library_paths = sorted(
+        path
+        for path in (root / "references").glob("*对白库*.md")
+        if path.is_file() and "索引" not in path.name
+    ) if (root / "references").is_dir() else []
+    if not library_paths:
+        add_issue(issues, "error", "dialogue.library_missing", "没有找到对白库文件", root / "references", root)
+
+    seen_ids: dict[str, Path] = {}
+    all_ids: list[str] = []
+    dimensions: set[str] = set()
+    referenced_source_ids: set[str] = set()
+    for path in library_paths:
+        text = read_text(path)
+        for card_id, block in iter_card_blocks(text):
+            all_ids.append(card_id)
+            if card_id in seen_ids:
+                add_issue(issues, "error", "dialogue.duplicate_id", f"对白编号重复：{card_id}", path, root)
+            else:
+                seen_ids[card_id] = path
+            for field in REQUIRED_CARD_FIELDS:
+                value = field_value(block, field)
+                if value is None:
+                    add_issue(issues, "error", "dialogue.field_missing", f"{card_id} 缺少字段：{field}", path, root)
+                elif field in {"交流目的", "主要情绪"}:
+                    dimensions.update(split_values(value))
+            source_type = field_value(block, "来源类型")
+            if source_type and not PLACEHOLDER_RE.search(source_type) and source_type not in ALLOWED_SOURCE_TYPES:
+                add_issue(
+                    issues,
+                    "error",
+                    "dialogue.source_type_invalid",
+                    f"{card_id} 的来源类型无效：{source_type}",
+                    path,
+                    root,
+                )
+            migration = field_value(block, "迁移方式")
+            if migration and not PLACEHOLDER_RE.search(migration) and migration not in ALLOWED_MIGRATIONS:
+                add_issue(
+                    issues,
+                    "error",
+                    "dialogue.migration_invalid",
+                    f"{card_id} 的迁移方式无效：{migration}",
+                    path,
+                    root,
+                )
+            intensity = field_value(block, "情绪强度")
+            if intensity and not PLACEHOLDER_RE.search(intensity) and not re.fullmatch(r"[0-3]", intensity):
+                add_issue(
+                    issues,
+                    "error",
+                    "dialogue.intensity_invalid",
+                    f"{card_id} 的情绪强度必须是 0–3",
+                    path,
+                    root,
+                )
+            tags = field_value(block, "检索标签")
+            if tags and not PLACEHOLDER_RE.search(tags):
+                present_tags = set(re.findall(r"\b([a-z_]+)\s*=", tags))
+                missing_tags = sorted(REQUIRED_TAGS - present_tags)
+                if missing_tags:
+                    add_issue(
+                        issues,
+                        "error",
+                        "dialogue.tags_missing",
+                        f"{card_id} 缺少检索标签：{', '.join(missing_tags)}",
+                        path,
+                        root,
+                    )
+            source_location = field_value(block, "来源位置")
+            source_refs = set(re.findall(r"\bSRC-\d{4}\b", source_location or "", re.IGNORECASE))
+            referenced_source_ids.update(item.upper() for item in source_refs)
+            if source_location and not PLACEHOLDER_RE.search(source_location) and not source_refs:
+                add_issue(
+                    issues,
+                    "error" if level == "release" else "warning",
+                    "dialogue.source_reference_missing",
+                    f"{card_id} 的来源位置未引用 SRC-编号",
+                    path,
+                    root,
+                )
+
+    metrics["cards"] = len(all_ids)
+    metrics["distinct_emotions_and_intents"] = len(dimensions)
+    min_cards = 20 if level == "release" else 1
+    if len(all_ids) < min_cards:
+        add_issue(
+            issues,
+            "error" if level == "release" else "warning",
+            "dialogue.too_few",
+            f"对白卡片为 {len(all_ids)} 张，{level} 级至少需要 {min_cards} 张",
+            root / "references",
+            root,
+        )
+    if level == "release" and len(dimensions) < 8:
+        add_issue(
+            issues,
+            "error",
+            "dialogue.coverage_low",
+            f"情绪与交流目的合计仅 {len(dimensions)} 种，发布版至少需要 8 种",
+            root / "references",
+            root,
+        )
+
+    index_path = root / "references" / "05-对白索引.md"
+    if index_path.is_file():
+        index_text = read_text(index_path).upper()
+        missing_from_index = [card_id for card_id in all_ids if card_id not in index_text]
+        if missing_from_index:
+            preview = ", ".join(missing_from_index[:5])
+            suffix = "…" if len(missing_from_index) > 5 else ""
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "dialogue.index_incomplete",
+                f"对白索引未包含 {len(missing_from_index)} 个编号：{preview}{suffix}",
+                index_path,
+                root,
+            )
+        index_ids = set(re.findall(r"\b[A-Z0-9][A-Z0-9-]*-\d{4}\b", index_text))
+        extra_index_ids = sorted(index_ids - set(all_ids))
+        if extra_index_ids and level == "release":
+            add_issue(
+                issues,
+                "error",
+                "dialogue.index_unknown_id",
+                "对白索引包含不存在的编号：" + ", ".join(extra_index_ids[:5]),
+                index_path,
+                root,
+            )
+
+    scene_path = root / "references" / "04-工作场景迁移.md"
+    scenes: set[str] = set()
+    if scene_path.is_file():
+        scenes = set(SCENE_HEADING_RE.findall(read_text(scene_path)))
+        missing_scenes = sorted(REQUIRED_SCENES - scenes)
+        if missing_scenes:
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "scene.coverage_missing",
+                "缺少工作场景：" + ", ".join(missing_scenes),
+                scene_path,
+                root,
+            )
+    metrics["work_scenes"] = len(scenes & REQUIRED_SCENES)
+
+    cases_path = root / "references" / "07-验证用例.md"
+    case_count = len(CASE_HEADING_RE.findall(read_text(cases_path))) if cases_path.is_file() else 0
+    metrics["validation_cases"] = case_count
+    if case_count < 15:
+        add_issue(
+            issues,
+            "error" if level == "release" else "warning",
+            "tests.too_few_cases",
+            f"验证用例仅 {case_count} 个，至少需要 15 个",
+            cases_path,
+            root,
+        )
+
+    sources_path = root / "references" / "08-来源索引.md"
+    source_ids = [item.upper() for item in SOURCE_HEADING_RE.findall(read_text(sources_path))] if sources_path.is_file() else []
+    source_count = len(source_ids)
+    metrics["sources"] = source_count
+    if source_count < 1:
+        add_issue(issues, "error", "sources.empty", "来源索引至少需要一个来源条目", sources_path, root)
+    if len(set(source_ids)) != len(source_ids):
+        add_issue(issues, "error", "sources.duplicate_id", "来源索引包含重复的 SRC 编号", sources_path, root)
+    unknown_source_ids = sorted(referenced_source_ids - set(source_ids))
+    if unknown_source_ids:
+        add_issue(
+            issues,
+            "error",
+            "sources.unknown_reference",
+            "对白卡片引用了不存在的来源：" + ", ".join(unknown_source_ids),
+            sources_path,
+            root,
+        )
+
+    openai_path = root / "agents" / "openai.yaml"
+    if openai_path.is_file():
+        openai_text = read_text(openai_path)
+        for key in ("display_name", "short_description", "default_prompt"):
+            if not re.search(rf"^\s*{key}:\s*\".+\"\s*$", openai_text, re.MULTILINE):
+                add_issue(issues, "error", "openai.field_invalid", f"agents/openai.yaml 缺少带引号的 {key}", openai_path, root)
+        short_match = re.search(r'^\s*short_description:\s*"(.+)"\s*$', openai_text, re.MULTILINE)
+        if short_match and not 25 <= len(short_match.group(1)) <= 64:
+            add_issue(
+                issues,
+                "error",
+                "openai.short_description_length",
+                "short_description 必须为 25–64 个字符",
+                openai_path,
+                root,
+            )
+        skill_name = ""
+        if skill_path.is_file():
+            skill_name = parse_frontmatter(read_text(skill_path))[0].get("name", "")
+        prompt_match = re.search(r'^\s*default_prompt:\s*"(.+)"\s*$', openai_text, re.MULTILINE)
+        if skill_name and prompt_match and f"${skill_name}" not in prompt_match.group(1):
+            add_issue(issues, "error", "openai.default_prompt", f"default_prompt 必须明确包含 ${skill_name}", openai_path, root)
+
+    error_count = sum(issue.severity == "error" for issue in issues)
+    warning_count = sum(issue.severity == "warning" for issue in issues)
+    return {
+        "valid": error_count == 0,
+        "level": level,
+        "path": str(root),
+        "metrics": metrics,
+        "placeholder_count": placeholder_count,
+        "error_count": error_count,
+        "warning_count": warning_count,
+        "issues": [asdict(issue) for issue in issues],
+    }
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    root = Path(args.path).expanduser().resolve()
+    result = validate_skill(root, args.level)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        status = "PASS" if result["valid"] else "FAIL"
+        metrics = result["metrics"]
+        print(f"[{status}] {result['path']}")
+        print(
+            f"level={result['level']} cards={metrics['cards']} "
+            f"dimensions={metrics['distinct_emotions_and_intents']} "
+            f"scenes={metrics['work_scenes']} cases={metrics['validation_cases']} "
+            f"sources={metrics['sources']}"
+        )
+        for item in result["issues"]:
+            location = f" ({item['file']})" if item["file"] else ""
+            print(f"{item['severity'].upper()} {item['code']}: {item['message']}{location}")
+    return 0 if result["valid"] else 1
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="创建并静态校验 Persona.skill 生成的角色人格 Skill。"
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init_parser = subparsers.add_parser("init", help="从标准模板创建角色人格 Skill 草稿")
+    init_parser.add_argument("--name", required=True, help="角色显示名")
+    init_parser.add_argument("--slug", required=True, help="小写连字符 Skill 标识")
+    init_parser.add_argument("--output", required=True, help="要创建的目标目录；必须不存在")
+    init_parser.set_defaults(func=cmd_init)
+
+    validate_parser = subparsers.add_parser("validate", help="校验角色人格 Skill")
+    validate_parser.add_argument("path", help="角色人格 Skill 目录")
+    validate_parser.add_argument(
+        "--level", choices=("draft", "release"), default="release", help="校验级别，默认 release"
+    )
+    validate_parser.add_argument("--json", action="store_true", help="输出 JSON 结果")
+    validate_parser.set_defaults(func=cmd_validate)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
