@@ -81,8 +81,8 @@ REQUIRED_SCENES = {
     "close",
 }
 
-REQUIRED_SKILL_TERMS = ("每轮加载", "对白使用", "事实保护", "停用与恢复")
-REQUIRED_CORE_TERMS = ("身份", "人格内核", "与用户的关系", "基本声纹", "工作边界")
+REQUIRED_SKILL_TERMS = ("回复前缀", "每条由 Agent 编写", "每轮加载", "对白使用", "事实保护", "停用与恢复")
+REQUIRED_CORE_TERMS = ("身份", "回复前缀", "人格内核", "与用户的关系", "基本声纹", "工作边界")
 TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".txt", ".json"}
 
 
@@ -197,6 +197,11 @@ def iter_card_blocks(text: str) -> Iterable[tuple[str, str]]:
         yield match.group(1).upper(), text[match.end() : end]
 
 
+def extract_reply_prefix(text: str) -> str | None:
+    match = re.search(r"^\s*-\s*(?:固定)?回复前缀[：:]\s*(.+?)\s*$", text, re.MULTILINE)
+    return match.group(1).strip().strip("`") if match else None
+
+
 def validate_skill(root: Path, level: str) -> dict[str, object]:
     issues: list[Issue] = []
     metrics = {
@@ -217,6 +222,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             add_issue(issues, "error", "file.missing", f"缺少必要文件：{relative}", path, root)
 
     skill_path = root / "SKILL.md"
+    skill_prefix: str | None = None
     if skill_path.is_file():
         skill_text = read_text(skill_path)
         metadata, metadata_error = parse_frontmatter(skill_text)
@@ -241,13 +247,32 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         for term in REQUIRED_SKILL_TERMS:
             if term not in skill_text:
                 add_issue(issues, "error", "skill.section_missing", f"SKILL.md 缺少运行章节：{term}", skill_path, root)
+        skill_prefix = extract_reply_prefix(skill_text)
+        if not skill_prefix:
+            add_issue(issues, "error", "persona.prefix_missing", "SKILL.md 缺少固定回复前缀", skill_path, root)
+        elif not skill_prefix.endswith("："):
+            add_issue(issues, "error", "persona.prefix_format", "固定回复前缀必须以全角冒号：结尾", skill_path, root)
 
     core_path = root / "references" / "01-角色核心.md"
+    core_prefix: str | None = None
     if core_path.is_file():
         core_text = read_text(core_path)
         for term in REQUIRED_CORE_TERMS:
             if term not in core_text:
                 add_issue(issues, "error", "core.section_missing", f"角色核心缺少章节：{term}", core_path, root)
+        core_prefix = extract_reply_prefix(core_text)
+        if not core_prefix:
+            add_issue(issues, "error", "persona.core_prefix_missing", "角色核心缺少回复前缀", core_path, root)
+
+    if skill_prefix and core_prefix and skill_prefix != core_prefix:
+        add_issue(
+            issues,
+            "error",
+            "persona.prefix_mismatch",
+            f"SKILL.md 与角色核心的回复前缀不一致：{skill_prefix} / {core_prefix}",
+            core_path,
+            root,
+        )
 
     all_text_paths = [path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in TEXT_SUFFIXES]
     placeholder_count = 0
