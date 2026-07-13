@@ -17,10 +17,10 @@ Persona.skill 可以把虚构角色、原创人格或你有权使用的人物资
 
 ```powershell
 # Codex
-git clone <仓库地址> "$HOME\.codex\skills\persona"
+git clone https://github.com/AgentPal/Persona.skill.git "$HOME\.codex\skills\persona"
 
 # Claude Code
-git clone <仓库地址> "$HOME\.claude\skills\persona"
+git clone https://github.com/AgentPal/Persona.skill.git "$HOME\.claude\skills\persona"
 ```
 
 如果 Agent 已经打开，安装后重新开启一次会话。
