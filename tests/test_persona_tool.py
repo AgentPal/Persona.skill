@@ -73,6 +73,7 @@ def card_text(
 - 词汇标记：词汇标记 {index}
 - 语法标记：语法标记 {index}
 - 语气标记：语气标记 {index}
+- 口语现象：口语现象观察 {index}
 - 句式与节奏：句式节奏观察 {index}
 - 识别度：{recognition}
 - 可直接使用：视场景
@@ -198,7 +199,7 @@ def build_fixture(
 
     voice_count = 12 if persona_type in {"existing-character", "real-person-simulation"} else 8
     voice_layers = (
-        "lexicon", "syntax", "ending", "prosody", "interaction", "emotion", "relation",
+        "lexicon", "syntax", "ending", "orality", "interaction", "emotion", "relation",
         "translation", "anti-voice", "lexicon", "syntax", "interaction",
     )
     voice_entries = []
@@ -232,12 +233,34 @@ def build_fixture(
 - 关系：关系条件 {index}
 - 角色即时反应：即时反应 {index}
 - 语言变化：语言变化 {index}
+- 响应形态：响应形态 {index}
+- 口语节奏：口语节奏 {index}
+- 禁止结构：禁止固定骨架 {index}
 - 行动倾向：行动倾向 {index}
 - 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
 - 反证或边界：模式边界 {index}
 """
         )
     write_text(target / "references" / "03-情绪与关系.md", "# 测试角色情绪与关系\n\n" + "\n".join(mode_entries))
+
+    anti_count = 8 if persona_type in {"existing-character", "real-person-simulation"} else 6
+    anti_entries = []
+    for index in range(1, anti_count + 1):
+        first = ((index - 1) * 2 % evidence_count) + 1
+        second = (first % evidence_count) + 1
+        anti_entries.append(
+            f"""### ANTI-{index:02d} | 测试反角色 {index}
+
+- 模式：AI 书面腔 {index}
+- 检测信号：通用套话{index} / 机械结构{index}
+- 为什么不像：与角色互动证据不同 {index}
+- 角色替代结构：使用原文支持的口语结构 {index}
+- 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
+- 适用场景：测试场景 {index}
+- 例外：精确技术事实保留 {index}
+"""
+        )
+    write_text(target / "references" / "09-反角色对照.md", "# 测试角色反角色对照\n\n" + "\n".join(anti_entries))
 
     scene_entries = []
     for index, scene_id in enumerate(sorted(persona_tool.REQUIRED_SCENES), start=1):
@@ -381,6 +404,10 @@ class PersonaToolTests(unittest.TestCase):
                 "caring",
                 "--intent",
                 "encourage",
+                "--speech-act",
+                "encourage",
+                "--trigger",
+                "failed",
                 "--risk",
                 "low",
                 "--language",
@@ -396,6 +423,8 @@ class PersonaToolTests(unittest.TestCase):
             self.assertGreaterEqual(len(first["related_rules"]["core"]), 1)
             self.assertGreaterEqual(len(first["related_rules"]["voice"]), 1)
             self.assertGreaterEqual(len(first["related_rules"]["modes"]), 1)
+            self.assertGreaterEqual(len(first["related_rules"]["anti"]), 1)
+            self.assertIn(first["retrieval"]["confidence"], {"high", "medium"})
             selected_ids = {item["card_id"] for item in first["selected"]}
             for group in first["related_rules"].values():
                 self.assertTrue(all(set(rule["matched_card_ids"]) <= selected_ids for rule in group))
@@ -533,6 +562,20 @@ class PersonaToolTests(unittest.TestCase):
             self.assertIn("dialogue.original_language_unverified", codes)
             self.assertIn("dialogue.exact_original_cards_low", codes)
 
+    def test_original_language_text_can_release_without_audio(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "text-only-role"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            library = role / "references" / "06-对白库.md"
+            text = library.read_text(encoding="utf-8").replace("- 原文质量：原声核验", "- 原文质量：原语言文本核验")
+            text = text.replace("- 语音表现：原声语速重音观察", "- 语音表现：未核验原声；文本口语观察")
+            write_text(library, text)
+            result = persona_tool.validate_skill(role, "release")
+            self.assertTrue(result["valid"], result["issues"])
+            self.assertEqual(result["metrics"]["performance_verified_cards"], 0)
+            warning_codes = {item["code"] for item in result["issues"] if item["severity"] == "warning"}
+            self.assertIn("dialogue.performance_cards_low", warning_codes)
+
     def test_boilerplate_observation_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "boilerplate-role"
@@ -618,6 +661,40 @@ class PersonaToolTests(unittest.TestCase):
             self.assertFalse(result["valid"])
             self.assertIn("tests.fidelity_not_passed", codes)
             self.assertIn("tests.blind_correct_low", codes)
+
+    def test_response_checker_flags_ai_and_project_manager_tone(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "tone-role"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            checker = role / "scripts" / "check_response.py"
+            generic = json.loads(
+                subprocess.check_output(
+                    [
+                        sys.executable,
+                        str(checker),
+                        "--root", str(role),
+                        "--text", "好的，基于以上情况，我们先确认目标，再梳理范围，然后确定方案，最后推进下一步，由你决定。",
+                    ],
+                    text=True,
+                    encoding="utf-8",
+                )
+            )
+            spoken = json.loads(
+                subprocess.check_output(
+                    [
+                        sys.executable,
+                        str(checker),
+                        "--root", str(role),
+                        "--text", "不行，这个我不喜欢。先做副本。要不要继续，你来选。",
+                    ],
+                    text=True,
+                    encoding="utf-8",
+                )
+            )
+            self.assertEqual(generic["status"], "fail")
+            self.assertGreaterEqual(generic["ai_tone_score"], 60)
+            self.assertEqual(spoken["status"], "pass")
+            self.assertLess(spoken["ai_tone_score"], 40)
 
     def test_original_persona_can_release_with_twenty_cards(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

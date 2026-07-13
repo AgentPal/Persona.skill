@@ -15,7 +15,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 CARD_HEADING_RE = re.compile(
     r"^##\s+([A-Z0-9][A-Z0-9-]*-\d{4})\s*$", re.MULTILINE | re.IGNORECASE
 )
-RULE_HEADING_RE = re.compile(r"^###\s+((?:CORE|VOICE|MODE)-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+RULE_HEADING_RE = re.compile(r"^###\s+((?:CORE|VOICE|MODE|ANTI)-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 TAG_RE = re.compile(r"\b([a-z_]+)\s*=\s*([^;；]+)", re.IGNORECASE)
 WEIGHTS = {
     "speech_act": 10,
@@ -53,6 +53,7 @@ class Match:
     card: Card
     score: int
     matched: Tuple[str, ...]
+    tier: int
 
 
 def read_text(path: Path) -> str:
@@ -173,11 +174,20 @@ def score_card(card: Card, query: Dict[str, str]) -> Optional[Match]:
         score += 2
     if card.recognition in SIGNATURE_LEVELS:
         score += 1
-    return Match(card=card, score=score, matched=tuple(matched))
+    matched_set = set(matched)
+    if matched_set & {"speech_act", "trigger"}:
+        tier = 3
+    elif "intent" in matched_set and matched_set & {"emotion", "relation", "task_state", "user_state"}:
+        tier = 2
+    elif matched_set & {"intent", "emotion", "relation", "task_state", "user_state"}:
+        tier = 1
+    else:
+        tier = 0
+    return Match(card=card, score=score, matched=tuple(matched), tier=tier)
 
 
 def choose_matches(matches: Sequence[Match], limit: int) -> List[Match]:
-    ranked = sorted(matches, key=lambda item: (-item.score, item.card.card_id))
+    ranked = sorted(matches, key=lambda item: (-item.tier, -item.score, item.card.card_id))
     chosen: List[Match] = []
     used_scenes: Set[str] = set()
     for candidate in ranked:
@@ -210,6 +220,7 @@ def related_rules(root: Path, selected: Sequence[Match], limit: int = 2) -> Dict
         "core": root / "references" / "01-角色核心.md",
         "voice": root / "references" / "02-语言声纹.md",
         "modes": root / "references" / "03-情绪与关系.md",
+        "anti": root / "references" / "09-反角色对照.md",
     }
     result: Dict[str, List[Dict[str, object]]] = {key: [] for key in references}
     for key, path in references.items():
@@ -233,10 +244,38 @@ def related_rules(root: Path, selected: Sequence[Match], limit: int = 2) -> Dict
     return result
 
 
+def retrieval_diagnostics(matches: Sequence[Match], query: Dict[str, str]) -> Dict[str, object]:
+    high_count = sum(item.tier == 3 for item in matches)
+    medium_or_high_count = sum(item.tier >= 2 for item in matches)
+    if high_count >= min(3, len(matches)) and matches:
+        confidence = "high"
+    elif medium_or_high_count >= min(3, len(matches)) and matches:
+        confidence = "medium"
+    else:
+        confidence = "low"
+    requested = {key for key in WEIGHTS if query.get(key, "").strip()}
+    covered = {key for item in matches for key in item.matched}
+    gaps = sorted(requested - covered)
+    warning = "" if confidence != "low" else "没有足够高相关卡片；不要把弱相关卡当作角色证据。"
+    return {
+        "confidence": confidence,
+        "high_signal_cards": high_count,
+        "medium_or_high_cards": medium_or_high_count,
+        "query_gaps": gaps,
+        "warning": warning,
+    }
+
+
 def markdown_output(
-    matches: Sequence[Match], card_count: int, rules: Dict[str, List[Dict[str, object]]]
+    matches: Sequence[Match], card_count: int, rules: Dict[str, List[Dict[str, object]]],
+    retrieval: Dict[str, object],
 ) -> str:
-    lines = [f"<!-- selected={len(matches)} library_cards={card_count} -->"]
+    lines = [
+        f"<!-- selected={len(matches)} library_cards={card_count} confidence={retrieval['confidence']} -->",
+        f"- 召回置信度：{retrieval['confidence']}",
+    ]
+    if retrieval["warning"]:
+        lines.append(f"- 警告：{retrieval['warning']}")
     for item in matches:
         matched = ", ".join(item.matched) if item.matched else "source-priority"
         lines.extend(
@@ -244,12 +283,13 @@ def markdown_output(
                 "",
                 f"## {item.card.card_id}",
                 f"- 匹配分：{item.score}",
+                f"- 相关层级：{('high' if item.tier == 3 else 'medium' if item.tier == 2 else 'low')}",
                 f"- 命中维度：{matched}",
                 f"- 对白库文件：{item.card.source_file}",
                 item.card.block,
             ]
         )
-    for label, key in (("角色核心规则", "core"), ("声纹规律", "voice"), ("情绪关系模式", "modes")):
+    for label, key in (("角色核心规则", "core"), ("声纹规律", "voice"), ("情绪关系模式", "modes"), ("反角色规则", "anti")):
         if not rules[key]:
             continue
         lines.extend(["", f"# 命中的{label}"])
@@ -266,14 +306,17 @@ def markdown_output(
 
 
 def json_output(
-    matches: Sequence[Match], card_count: int, rules: Dict[str, List[Dict[str, object]]]
+    matches: Sequence[Match], card_count: int, rules: Dict[str, List[Dict[str, object]]],
+    retrieval: Dict[str, object],
 ) -> str:
     payload = {
         "library_cards": card_count,
+        "retrieval": retrieval,
         "selected": [
             {
                 "card_id": item.card.card_id,
                 "score": item.score,
+                "relevance": "high" if item.tier == 3 else ("medium" if item.tier == 2 else "low"),
                 "matched": list(item.matched),
                 "source_file": item.card.source_file,
                 "source_type": item.card.source_type,
@@ -344,12 +387,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ]
     selected = choose_matches(matches, min(args.limit, len(matches)))
     rules = related_rules(root, selected)
+    retrieval = retrieval_diagnostics(selected, query)
     if args.format == "json":
-        print(json_output(selected, len(cards), rules), end="")
+        print(json_output(selected, len(cards), rules, retrieval), end="")
     elif args.format == "ids":
         print("\n".join(item.card.card_id for item in selected))
     else:
-        print(markdown_output(selected, len(cards), rules), end="")
+        print(markdown_output(selected, len(cards), rules, retrieval), end="")
     return 0
 
 

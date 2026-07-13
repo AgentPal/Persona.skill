@@ -28,6 +28,7 @@ RESEARCH_HEADING_RE = re.compile(r"^###\s+(RESEARCH-\d{2})\s+\|", re.MULTILINE |
 VOICE_HEADING_RE = re.compile(r"^###\s+(VOICE-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 MODE_HEADING_RE = re.compile(r"^###\s+(MODE-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 CORE_HEADING_RE = re.compile(r"^###\s+(CORE-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+ANTI_HEADING_RE = re.compile(r"^###\s+(ANTI-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 PLACEHOLDER_RE = re.compile(
     r"\{\{[A-Z0-9_]+\}\}|\[待填写[^\]]*\]|\b(?:TODO|TBD)\b", re.IGNORECASE
 )
@@ -36,6 +37,7 @@ REQUIRED_FILES = (
     "SKILL.md",
     "agents/openai.yaml",
     "scripts/select_dialogues.py",
+    "scripts/check_response.py",
     "references/01-角色核心.md",
     "references/02-语言声纹.md",
     "references/03-情绪与关系.md",
@@ -43,6 +45,7 @@ REQUIRED_FILES = (
     "references/05-对白索引.md",
     "references/07-验证用例.md",
     "references/08-来源索引.md",
+    "references/09-反角色对照.md",
 )
 
 REQUIRED_CARD_FIELDS = (
@@ -72,6 +75,7 @@ REQUIRED_CARD_FIELDS = (
     "词汇标记",
     "语法标记",
     "语气标记",
+    "口语现象",
     "句式与节奏",
     "识别度",
     "可直接使用",
@@ -100,11 +104,16 @@ REQUIRED_TAGS = {
 }
 REQUIRED_VOICE_FIELDS = ("层级", "规律", "证据卡", "反证或边界", "适用条件", "置信度")
 REQUIRED_VOICE_LAYERS = {
-    "lexicon", "syntax", "ending", "prosody", "interaction", "emotion", "relation",
+    "lexicon", "syntax", "ending", "orality", "interaction", "emotion", "relation",
     "translation", "anti-voice",
 }
+ALLOWED_VOICE_LAYERS = REQUIRED_VOICE_LAYERS | {"prosody"}
 REQUIRED_MODE_FIELDS = (
-    "情绪", "触发", "关系", "角色即时反应", "语言变化", "行动倾向", "证据卡", "反证或边界",
+    "情绪", "触发", "关系", "角色即时反应", "语言变化", "响应形态", "口语节奏",
+    "禁止结构", "行动倾向", "证据卡", "反证或边界",
+)
+REQUIRED_ANTI_FIELDS = (
+    "模式", "检测信号", "为什么不像", "角色替代结构", "证据卡", "适用场景", "例外",
 )
 REQUIRED_CORE_RULE_FIELDS = (
     "层级", "结论", "可观察行为", "证据卡", "其他来源", "反证或边界", "适用条件", "置信度",
@@ -292,6 +301,13 @@ def iter_core_blocks(text: str) -> Iterable[tuple[str, str]]:
         yield match.group(1).upper(), text[match.end() : end]
 
 
+def iter_anti_blocks(text: str) -> Iterable[tuple[str, str]]:
+    matches = list(ANTI_HEADING_RE.finditer(text))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        yield match.group(1).upper(), text[match.end() : end]
+
+
 def iter_scene_blocks(text: str) -> Iterable[tuple[str, str]]:
     matches = list(SCENE_HEADING_RE.finditer(text))
     for index, match in enumerate(matches):
@@ -373,6 +389,8 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         "voice_rules": 0,
         "voice_layers": 0,
         "voice_evidence_cards": 0,
+        "anti_rules": 0,
+        "anti_evidence_cards": 0,
         "core_rules": 0,
         "core_layers": 0,
         "core_evidence_cards": 0,
@@ -600,6 +618,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     canonical_authored_card_ids: set[str] = set()
     distinct_source_scenes: set[str] = set()
     card_scene_ids: dict[str, str] = {}
+    card_qualities: dict[str, str] = {}
     signature_card_ids: set[str] = set()
     normalized_original_owners: dict[str, str] = {}
     noncanonical_card_ids: set[str] = set()
@@ -653,6 +672,8 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             original_text = field_value(block, "原文")
             card_language = field_value(block, "原文语言")
             original_quality = field_value(block, "原文质量")
+            if original_quality:
+                card_qualities[card_id] = original_quality
             if (
                 original_quality
                 and not PLACEHOLDER_RE.search(original_quality)
@@ -801,7 +822,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 )
             for annotation_field in (
                 "前置原文", "触发话语", "后续原文", "互动功能", "情绪转折", "语音表现",
-                "词汇标记", "语法标记", "语气标记", "句式与节奏",
+                "词汇标记", "语法标记", "语气标记", "口语现象", "句式与节奏",
             ):
                 annotation = field_value(block, annotation_field)
                 if has_substantive_value(annotation, allow_none=True):
@@ -1148,7 +1169,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     root,
                 )
         layer = field_value(block, "层级")
-        if layer and layer not in REQUIRED_VOICE_LAYERS:
+        if layer and layer not in ALLOWED_VOICE_LAYERS:
             add_issue(
                 issues,
                 "error" if level == "release" else "warning",
@@ -1189,9 +1210,28 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 voice_path,
                 root,
             )
+        if layer == "prosody" and not any(card_qualities.get(card_id) == "原声核验" for card_id in evidence_ids):
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "voice.prosody_without_audio",
+                f"{voice_id} 是 prosody 规律，但证据卡没有原声核验；不得从文本推测表演",
+                voice_path,
+                root,
+            )
     metrics["voice_rules"] = len(voice_blocks)
     metrics["voice_layers"] = len(voice_layers)
     metrics["voice_evidence_cards"] = len(voice_evidence_ids & evidence_card_ids)
+    missing_required_voice_layers = sorted(REQUIRED_VOICE_LAYERS - voice_layers)
+    if level == "release" and persona_type in {"existing-character", "real-person-simulation"} and missing_required_voice_layers:
+        add_issue(
+            issues,
+            target_severity,
+            "voice.required_layers_missing",
+            "正式版缺少必需的文本声纹层级：" + ", ".join(missing_required_voice_layers),
+            voice_path,
+            root,
+        )
 
     mode_path = root / "references" / "03-情绪与关系.md"
     mode_text = read_text(mode_path) if mode_path.is_file() else ""
@@ -1247,10 +1287,61 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     metrics["emotion_modes"] = len(mode_blocks)
     metrics["mode_dimensions"] = len(mode_dimensions)
 
-    core_target, core_layer_target, core_evidence_target, voice_target, voice_layer_target, voice_evidence_target, mode_target, mode_dimension_target = (
-        (12, 10, 20, 12, 9, 20, 12, 8)
+    anti_path = root / "references" / "09-反角色对照.md"
+    anti_text = read_text(anti_path) if anti_path.is_file() else ""
+    anti_blocks = list(iter_anti_blocks(anti_text))
+    duplicate_anti_ids = sorted(anti_id for anti_id, count in Counter(item[0] for item in anti_blocks).items() if count > 1)
+    if duplicate_anti_ids:
+        add_issue(issues, "error", "anti.duplicate_id", "反角色编号重复：" + ", ".join(duplicate_anti_ids), anti_path, root)
+    anti_evidence_ids: set[str] = set()
+    for anti_id, block in anti_blocks:
+        for field in REQUIRED_ANTI_FIELDS:
+            if not has_substantive_value(field_value(block, field)):
+                add_issue(
+                    issues,
+                    "error" if level == "release" else "warning",
+                    "anti.field_missing",
+                    f"{anti_id} 缺少可用字段：{field}",
+                    anti_path,
+                    root,
+                )
+        evidence_ids = set(re.findall(r"\b[A-Z0-9][A-Z0-9-]*-\d{4}\b", field_value(block, "证据卡") or ""))
+        anti_evidence_ids.update(evidence_ids)
+        if len(evidence_ids) < 2:
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "anti.evidence_too_few",
+                f"{anti_id} 至少需要两张跨场景证据卡说明角色的替代方式",
+                anti_path,
+                root,
+            )
+        elif len({card_scene_ids.get(card_id) for card_id in evidence_ids if card_scene_ids.get(card_id)}) < 2:
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "anti.evidence_same_scene",
+                f"{anti_id} 的证据卡必须来自至少两个不同场景",
+                anti_path,
+                root,
+            )
+        unknown_evidence = sorted(evidence_ids - evidence_card_ids)
+        if unknown_evidence:
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "anti.evidence_invalid",
+                f"{anti_id} 引用了不存在、未核验或非原始语言的证据卡：" + ", ".join(unknown_evidence),
+                anti_path,
+                root,
+            )
+    metrics["anti_rules"] = len(anti_blocks)
+    metrics["anti_evidence_cards"] = len(anti_evidence_ids & evidence_card_ids)
+
+    core_target, core_layer_target, core_evidence_target, voice_target, voice_layer_target, voice_evidence_target, mode_target, mode_dimension_target, anti_target = (
+        (12, 10, 20, 12, 9, 20, 12, 8, 8)
         if persona_type in {"existing-character", "real-person-simulation"}
-        else (8, 6, 12, 8, 6, 12, 8, 6)
+        else (8, 6, 12, 8, 6, 12, 8, 6, 6)
     )
     for metric_name, actual, target, code, label, path in (
         ("core_rules", len(core_blocks), core_target, "core_rule.count_low", "角色核心规则", core_path),
@@ -1261,6 +1352,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         ("voice_evidence_cards", len(voice_evidence_ids & evidence_card_ids), voice_evidence_target, "voice.evidence_coverage_low", "声纹证据卡", voice_path),
         ("emotion_modes", len(mode_blocks), mode_target, "mode.count_low", "情绪关系模式", mode_path),
         ("mode_dimensions", len(mode_dimensions), mode_dimension_target, "mode.dimensions_low", "情绪维度", mode_path),
+        ("anti_rules", len(anti_blocks), anti_target, "anti.count_low", "反角色规则", anti_path),
     ):
         if level == "release" and actual < target:
             add_issue(
@@ -1365,9 +1457,9 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             verification_label = "原声" if original_medium in {"视听", "混合"} else "原始版式"
             add_issue(
                 issues,
-                target_severity,
+                "warning",
                 "dialogue.performance_cards_low",
-                f"完成{verification_label}核验的原文卡仅 {performance_count} 张，正式版收集目标为 40 张",
+                f"完成{verification_label}核验的原文卡为 {performance_count} 张；这是可选增强，不阻止正式版，且不得据文本推测未核验表演",
                 root / "references",
                 root,
             )
@@ -1413,7 +1505,6 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             len(all_ids) >= 80
             and len(dimensions) >= 12
             and len(verified_fidelity_card_ids) >= 80
-            and metrics["performance_verified_cards"] >= 40
             and len(distinct_source_scenes) >= 40
             and len(signature_card_ids) >= 20
             and source_count >= 5
@@ -1422,10 +1513,11 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and len(core_layers) >= 10
             and len(core_evidence_ids & evidence_card_ids) >= 20
             and len(voice_blocks) >= 12
-            and len(voice_layers) >= 9
+            and REQUIRED_VOICE_LAYERS.issubset(voice_layers)
             and len(voice_evidence_ids & evidence_card_ids) >= 20
             and len(mode_blocks) >= 12
             and len(mode_dimensions) >= 8
+            and len(anti_blocks) >= 8
             and len(scenes & REQUIRED_SCENES) == len(REQUIRED_SCENES)
             and case_count >= 20
         )
@@ -1435,7 +1527,9 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and len(dimensions) >= 10
             and len(core_blocks) >= 12
             and len(voice_blocks) >= 12
+            and REQUIRED_VOICE_LAYERS.issubset(voice_layers)
             and len(mode_blocks) >= 12
+            and len(anti_blocks) >= 8
         )
     elif persona_type in {"original-persona", "composite-original"}:
         target_met = (
@@ -1444,6 +1538,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and len(core_blocks) >= 8
             and len(voice_blocks) >= 8
             and len(mode_blocks) >= 8
+            and len(anti_blocks) >= 6
         )
     if target_met:
         metrics["coverage_path"] = "target-met"
@@ -1473,6 +1568,20 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 "selector.syntax_error",
                 f"对白选择器无法解析：{exc.msg}（第 {exc.lineno} 行）",
                 selector_path,
+                root,
+            )
+
+    response_checker_path = root / "scripts" / "check_response.py"
+    if response_checker_path.is_file():
+        try:
+            compile(read_text(response_checker_path), str(response_checker_path), "exec")
+        except SyntaxError as exc:
+            add_issue(
+                issues,
+                "error",
+                "response_checker.syntax_error",
+                f"回复检测器无法解析：{exc.msg}（第 {exc.lineno} 行）",
+                response_checker_path,
                 root,
             )
 
@@ -1537,6 +1646,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             f"core_evidence_cards={metrics['core_evidence_cards']} "
             f"voice_rules={metrics['voice_rules']} voice_layers={metrics['voice_layers']} "
             f"voice_evidence_cards={metrics['voice_evidence_cards']} "
+            f"anti_rules={metrics['anti_rules']} anti_evidence_cards={metrics['anti_evidence_cards']} "
             f"emotion_modes={metrics['emotion_modes']} mode_dimensions={metrics['mode_dimensions']} "
             f"scenes={metrics['work_scenes']} cases={metrics['validation_cases']} "
             f"sources={metrics['sources']} original_sources={metrics['original_sources']}"
