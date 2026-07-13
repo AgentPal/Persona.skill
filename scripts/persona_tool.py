@@ -30,6 +30,7 @@ PLACEHOLDER_RE = re.compile(
 REQUIRED_FILES = (
     "SKILL.md",
     "agents/openai.yaml",
+    "scripts/select_dialogues.py",
     "references/01-角色核心.md",
     "references/02-语言声纹.md",
     "references/03-情绪与关系.md",
@@ -59,7 +60,14 @@ REQUIRED_CARD_FIELDS = (
     "重复限制",
 )
 
-ALLOWED_SOURCE_TYPES = {"原作明确", "用户补充", "合理推导", "Persona.skill 补齐"}
+ALLOWED_SOURCE_TYPES = {"原作明确", "用户补充", "公开资料", "合理推导", "Persona.skill 补齐"}
+ALLOWED_PERSONA_TYPES = {
+    "existing-character",
+    "original-persona",
+    "real-person-simulation",
+    "composite-original",
+}
+ALLOWED_INDEX_SOURCE_TYPES = ALLOWED_SOURCE_TYPES
 ALLOWED_MIGRATIONS = {"直接使用", "修改后使用", "仅作风格参考"}
 REQUIRED_TAGS = {"task_state", "user_state", "emotion", "intent", "relation", "risk", "language"}
 
@@ -197,6 +205,20 @@ def iter_card_blocks(text: str) -> Iterable[tuple[str, str]]:
         yield match.group(1).upper(), text[match.end() : end]
 
 
+def iter_source_blocks(text: str) -> Iterable[tuple[str, str]]:
+    matches = list(SOURCE_HEADING_RE.finditer(text))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        yield match.group(1).upper(), text[match.end() : end]
+
+
+def has_representative_short_line(value: str | None) -> bool:
+    if not value or PLACEHOLDER_RE.search(value):
+        return False
+    normalized = value.strip().strip("`'\"“”‘’").lower()
+    return bool(normalized) and normalized not in {"无", "none", "n/a", "不适用"} and not normalized.startswith("无（")
+
+
 def extract_reply_prefix(text: str) -> str | None:
     match = re.search(r"^\s*-\s*(?:固定)?回复前缀[：:]\s*(.+?)\s*$", text, re.MULTILINE)
     return match.group(1).strip().strip("`") if match else None
@@ -205,11 +227,16 @@ def extract_reply_prefix(text: str) -> str | None:
 def validate_skill(root: Path, level: str) -> dict[str, object]:
     issues: list[Issue] = []
     metrics = {
+        "persona_type": "unknown",
         "cards": 0,
+        "original_cards": 0,
+        "original_dialogue_cards": 0,
+        "derived_cards": 0,
         "distinct_emotions_and_intents": 0,
         "work_scenes": 0,
         "validation_cases": 0,
         "sources": 0,
+        "original_sources": 0,
     }
 
     if not root.is_dir():
@@ -255,6 +282,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
 
     core_path = root / "references" / "01-角色核心.md"
     core_prefix: str | None = None
+    persona_type = "unknown"
     if core_path.is_file():
         core_text = read_text(core_path)
         for term in REQUIRED_CORE_TERMS:
@@ -263,6 +291,19 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         core_prefix = extract_reply_prefix(core_text)
         if not core_prefix:
             add_issue(issues, "error", "persona.core_prefix_missing", "角色核心缺少回复前缀", core_path, root)
+        raw_persona_type = field_value(core_text, "人格来源类型")
+        if raw_persona_type and not PLACEHOLDER_RE.search(raw_persona_type):
+            persona_type = raw_persona_type.strip().lower()
+        if persona_type not in ALLOWED_PERSONA_TYPES:
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "persona.type_invalid",
+                "人格来源类型必须是 existing-character、original-persona、real-person-simulation 或 composite-original",
+                core_path,
+                root,
+            )
+    metrics["persona_type"] = persona_type
 
     if skill_prefix and core_prefix and skill_prefix != core_prefix:
         add_issue(
@@ -292,7 +333,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
 
     library_paths = sorted(
         path
-        for path in (root / "references").glob("*对白库*.md")
+        for path in (root / "references").rglob("*对白库*.md")
         if path.is_file() and "索引" not in path.name
     ) if (root / "references").is_dir() else []
     if not library_paths:
@@ -302,6 +343,9 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     all_ids: list[str] = []
     dimensions: set[str] = set()
     referenced_source_ids: set[str] = set()
+    original_referenced_source_ids: set[str] = set()
+    original_card_sources: dict[str, set[str]] = {}
+    original_short_card_ids: set[str] = set()
     for path in library_paths:
         text = read_text(path)
         for card_id, block in iter_card_blocks(text):
@@ -326,6 +370,9 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     path,
                     root,
                 )
+            if source_type == "原作明确":
+                if has_representative_short_line(field_value(block, "代表性短句")):
+                    original_short_card_ids.add(card_id)
             migration = field_value(block, "迁移方式")
             if migration and not PLACEHOLDER_RE.search(migration) and migration not in ALLOWED_MIGRATIONS:
                 add_issue(
@@ -361,7 +408,11 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     )
             source_location = field_value(block, "来源位置")
             source_refs = set(re.findall(r"\bSRC-\d{4}\b", source_location or "", re.IGNORECASE))
-            referenced_source_ids.update(item.upper() for item in source_refs)
+            normalized_source_refs = {item.upper() for item in source_refs}
+            referenced_source_ids.update(normalized_source_refs)
+            if source_type == "原作明确":
+                original_referenced_source_ids.update(normalized_source_refs)
+                original_card_sources[card_id] = normalized_source_refs
             if source_location and not PLACEHOLDER_RE.search(source_location) and not source_refs:
                 add_issue(
                     issues,
@@ -374,7 +425,13 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
 
     metrics["cards"] = len(all_ids)
     metrics["distinct_emotions_and_intents"] = len(dimensions)
-    min_cards = 20 if level == "release" else 1
+    release_thresholds = {
+        "existing-character": (80, 12),
+        "real-person-simulation": (40, 10),
+        "original-persona": (20, 8),
+        "composite-original": (20, 8),
+    }
+    min_cards, min_dimensions = release_thresholds.get(persona_type, (20, 8)) if level == "release" else (1, 1)
     if len(all_ids) < min_cards:
         add_issue(
             issues,
@@ -384,16 +441,15 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             root / "references",
             root,
         )
-    if level == "release" and len(dimensions) < 8:
+    if level == "release" and len(dimensions) < min_dimensions:
         add_issue(
             issues,
             "error",
             "dialogue.coverage_low",
-            f"情绪与交流目的合计仅 {len(dimensions)} 种，发布版至少需要 8 种",
+            f"情绪与交流目的合计仅 {len(dimensions)} 种，{persona_type} 发布版至少需要 {min_dimensions} 种",
             root / "references",
             root,
         )
-
     index_path = root / "references" / "05-对白索引.md"
     if index_path.is_file():
         index_text = read_text(index_path).upper()
@@ -451,13 +507,85 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         )
 
     sources_path = root / "references" / "08-来源索引.md"
-    source_ids = [item.upper() for item in SOURCE_HEADING_RE.findall(read_text(sources_path))] if sources_path.is_file() else []
+    source_blocks = list(iter_source_blocks(read_text(sources_path))) if sources_path.is_file() else []
+    source_ids = [source_id for source_id, _ in source_blocks]
     source_count = len(source_ids)
     metrics["sources"] = source_count
     if source_count < 1:
         add_issue(issues, "error", "sources.empty", "来源索引至少需要一个来源条目", sources_path, root)
     if len(set(source_ids)) != len(source_ids):
         add_issue(issues, "error", "sources.duplicate_id", "来源索引包含重复的 SRC 编号", sources_path, root)
+    original_source_ids: set[str] = set()
+    for source_id, block in source_blocks:
+        source_type = field_value(block, "来源类型")
+        if source_type == "原作明确":
+            original_source_ids.add(source_id)
+        elif source_type and not PLACEHOLDER_RE.search(source_type) and source_type not in ALLOWED_INDEX_SOURCE_TYPES:
+            add_issue(
+                issues,
+                "error",
+                "sources.type_invalid",
+                f"{source_id} 的来源类型无效：{source_type}",
+                sources_path,
+                root,
+            )
+    supporting_original_sources = original_source_ids & original_referenced_source_ids
+    verified_original_card_ids = {
+        card_id for card_id, source_refs in original_card_sources.items() if source_refs & original_source_ids
+    }
+    verified_original_dialogue_ids = verified_original_card_ids & original_short_card_ids
+    metrics["original_cards"] = len(verified_original_card_ids)
+    metrics["original_dialogue_cards"] = len(verified_original_dialogue_ids)
+    metrics["derived_cards"] = len(all_ids) - len(verified_original_card_ids)
+    metrics["original_sources"] = len(supporting_original_sources)
+    unverified_original_card_ids = sorted(set(original_card_sources) - verified_original_card_ids)
+    if unverified_original_card_ids:
+        add_issue(
+            issues,
+            "error" if level == "release" else "warning",
+            "dialogue.original_source_mismatch",
+            f"有 {len(unverified_original_card_ids)} 张原作明确卡未引用原作明确来源："
+            + ", ".join(unverified_original_card_ids[:5]),
+            sources_path,
+            root,
+        )
+    if level == "release" and persona_type == "existing-character":
+        if len(verified_original_card_ids) < 40:
+            add_issue(
+                issues,
+                "error",
+                "dialogue.original_cards_low",
+                f"经来源核对的原作明确场景卡仅 {len(verified_original_card_ids)} 张，现有作品角色发布版至少需要 40 张",
+                root / "references",
+                root,
+            )
+        if len(verified_original_dialogue_ids) < 20:
+            add_issue(
+                issues,
+                "error",
+                "dialogue.original_quotes_low",
+                f"经来源核对且含代表性原作短句的卡片仅 {len(verified_original_dialogue_ids)} 张，现有作品角色发布版至少需要 20 张",
+                root / "references",
+                root,
+            )
+        if source_count < 5:
+            add_issue(
+                issues,
+                "error",
+                "sources.too_few",
+                f"来源条目仅 {source_count} 个，现有作品角色发布版至少需要 5 个",
+                sources_path,
+                root,
+            )
+        if len(supporting_original_sources) < 3:
+            add_issue(
+                issues,
+                "error",
+                "sources.original_too_few",
+                f"被原作卡片实际引用的原作明确来源仅 {len(supporting_original_sources)} 个，现有作品角色发布版至少需要 3 个",
+                sources_path,
+                root,
+            )
     unknown_source_ids = sorted(referenced_source_ids - set(source_ids))
     if unknown_source_ids:
         add_issue(
@@ -468,6 +596,20 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             sources_path,
             root,
         )
+
+    selector_path = root / "scripts" / "select_dialogues.py"
+    if selector_path.is_file():
+        try:
+            compile(read_text(selector_path), str(selector_path), "exec")
+        except SyntaxError as exc:
+            add_issue(
+                issues,
+                "error",
+                "selector.syntax_error",
+                f"对白选择器无法解析：{exc.msg}（第 {exc.lineno} 行）",
+                selector_path,
+                root,
+            )
 
     openai_path = root / "agents" / "openai.yaml"
     if openai_path.is_file():
@@ -516,10 +658,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
         metrics = result["metrics"]
         print(f"[{status}] {result['path']}")
         print(
-            f"level={result['level']} cards={metrics['cards']} "
+            f"level={result['level']} persona_type={metrics['persona_type']} "
+            f"cards={metrics['cards']} original_cards={metrics['original_cards']} "
+            f"original_dialogue_cards={metrics['original_dialogue_cards']} "
+            f"derived_cards={metrics['derived_cards']} "
             f"dimensions={metrics['distinct_emotions_and_intents']} "
             f"scenes={metrics['work_scenes']} cases={metrics['validation_cases']} "
-            f"sources={metrics['sources']}"
+            f"sources={metrics['sources']} original_sources={metrics['original_sources']}"
         )
         for item in result["issues"]:
             location = f" ({item['file']})" if item["file"] else ""
