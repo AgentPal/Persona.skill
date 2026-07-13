@@ -15,15 +15,17 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 CARD_HEADING_RE = re.compile(
     r"^##\s+([A-Z0-9][A-Z0-9-]*-\d{4})\s*$", re.MULTILINE | re.IGNORECASE
 )
+RULE_HEADING_RE = re.compile(r"^###\s+((?:CORE|VOICE|MODE)-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 TAG_RE = re.compile(r"\b([a-z_]+)\s*=\s*([^;；]+)", re.IGNORECASE)
 WEIGHTS = {
-    "task_state": 8,
+    "speech_act": 10,
+    "trigger": 9,
     "intent": 7,
     "risk": 6,
-    "user_state": 4,
-    "emotion": 4,
-    "relation": 3,
-    "language": 2,
+    "relation": 5,
+    "emotion": 5,
+    "task_state": 4,
+    "user_state": 2,
 }
 HIGH_RISKS = {"high", "critical", "danger", "severe"}
 LOW_RISKS = {"none", "low"}
@@ -39,7 +41,11 @@ class Card:
     source_type: str
     card_type: str
     original_text: str
+    original_language: str
+    original_quality: str
     recognition: str
+    scene_id: str
+    interaction_function: str
 
 
 @dataclass(frozen=True)
@@ -78,6 +84,13 @@ def iter_card_blocks(text: str) -> Iterable[Tuple[str, str]]:
         yield match.group(1).upper(), text[match.end() : end].strip()
 
 
+def iter_rule_blocks(text: str) -> Iterable[Tuple[str, str]]:
+    matches = list(RULE_HEADING_RE.finditer(text))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        yield match.group(1).upper(), text[match.end() : end].strip()
+
+
 def load_cards(root: Path) -> List[Card]:
     references = root / "references"
     paths = sorted(
@@ -101,7 +114,11 @@ def load_cards(root: Path) -> List[Card]:
                     source_type=field_value(block, "来源类型"),
                     card_type=field_value(block, "卡片类型"),
                     original_text=field_value(block, "原文"),
+                    original_language=field_value(block, "原文语言"),
+                    original_quality=field_value(block, "原文质量"),
                     recognition=field_value(block, "识别度"),
+                    scene_id=field_value(block, "场景编号"),
+                    interaction_function=field_value(block, "互动功能"),
                 )
             )
     return cards
@@ -129,9 +146,9 @@ def risk_allowed(query: str, values: Set[str]) -> bool:
 
 
 def score_card(card: Card, query: Dict[str, str]) -> Optional[Match]:
-    language = query.get("language", "")
+    source_language = query.get("source_language", "")
     risk = query.get("risk", "")
-    if not language_matches(language, card.tags.get("language", set())):
+    if source_language and not language_matches(source_language, {card.original_language.lower()}):
         return None
     if not risk_allowed(risk, card.tags.get("risk", set())):
         return None
@@ -143,15 +160,16 @@ def score_card(card: Card, query: Dict[str, str]) -> Optional[Match]:
         if not wanted:
             continue
         values = card.tags.get(key, set())
-        if key == "language":
-            is_match = language_matches(wanted, values)
-        else:
-            is_match = wanted in values or "any" in values or "all" in values
+        is_match = wanted in values or "any" in values or "all" in values
         if is_match:
             score += weight
             matched.append(key)
 
     if card.source_type == "原作明确":
+        score += 2
+    if card.original_quality == "原声核验":
+        score += 3
+    elif card.original_quality in {"原语言文本核验", "原始版式核验", "原创确认"}:
         score += 2
     if card.recognition in SIGNATURE_LEVELS:
         score += 1
@@ -160,7 +178,23 @@ def score_card(card: Card, query: Dict[str, str]) -> Optional[Match]:
 
 def choose_matches(matches: Sequence[Match], limit: int) -> List[Match]:
     ranked = sorted(matches, key=lambda item: (-item.score, item.card.card_id))
-    return ranked[:limit]
+    chosen: List[Match] = []
+    used_scenes: Set[str] = set()
+    for candidate in ranked:
+        scene = candidate.card.scene_id
+        if scene and scene in used_scenes:
+            continue
+        chosen.append(candidate)
+        if scene:
+            used_scenes.add(scene)
+        if len(chosen) >= limit:
+            return chosen
+    for candidate in ranked:
+        if candidate not in chosen:
+            chosen.append(candidate)
+        if len(chosen) >= limit:
+            break
+    return chosen
 
 
 def parse_excludes(values: Sequence[str]) -> Set[str]:
@@ -170,7 +204,38 @@ def parse_excludes(values: Sequence[str]) -> Set[str]:
     return result
 
 
-def markdown_output(matches: Sequence[Match], card_count: int) -> str:
+def related_rules(root: Path, selected: Sequence[Match], limit: int = 2) -> Dict[str, List[Dict[str, object]]]:
+    selected_ids = {item.card.card_id for item in selected}
+    references = {
+        "core": root / "references" / "01-角色核心.md",
+        "voice": root / "references" / "02-语言声纹.md",
+        "modes": root / "references" / "03-情绪与关系.md",
+    }
+    result: Dict[str, List[Dict[str, object]]] = {key: [] for key in references}
+    for key, path in references.items():
+        if not path.is_file():
+            continue
+        candidates: List[Tuple[int, str, str, List[str]]] = []
+        for rule_id, block in iter_rule_blocks(read_text(path)):
+            evidence_ids = set(re.findall(r"\b[A-Z0-9][A-Z0-9-]*-\d{4}\b", field_value(block, "证据卡")))
+            matched_ids = sorted(selected_ids & evidence_ids)
+            if matched_ids:
+                candidates.append((len(matched_ids), rule_id, block, matched_ids))
+        candidates.sort(key=lambda item: (-item[0], item[1]))
+        result[key] = [
+            {
+                "rule_id": rule_id,
+                "matched_card_ids": matched_ids,
+                "content": block,
+            }
+            for _, rule_id, block, matched_ids in candidates[:limit]
+        ]
+    return result
+
+
+def markdown_output(
+    matches: Sequence[Match], card_count: int, rules: Dict[str, List[Dict[str, object]]]
+) -> str:
     lines = [f"<!-- selected={len(matches)} library_cards={card_count} -->"]
     for item in matches:
         matched = ", ".join(item.matched) if item.matched else "source-priority"
@@ -184,10 +249,25 @@ def markdown_output(matches: Sequence[Match], card_count: int) -> str:
                 item.card.block,
             ]
         )
+    for label, key in (("角色核心规则", "core"), ("声纹规律", "voice"), ("情绪关系模式", "modes")):
+        if not rules[key]:
+            continue
+        lines.extend(["", f"# 命中的{label}"])
+        for rule in rules[key]:
+            lines.extend(
+                [
+                    "",
+                    f"## {rule['rule_id']}",
+                    f"- 命中证据卡：{', '.join(rule['matched_card_ids'])}",
+                    str(rule["content"]),
+                ]
+            )
     return "\n".join(lines).rstrip() + "\n"
 
 
-def json_output(matches: Sequence[Match], card_count: int) -> str:
+def json_output(
+    matches: Sequence[Match], card_count: int, rules: Dict[str, List[Dict[str, object]]]
+) -> str:
     payload = {
         "library_cards": card_count,
         "selected": [
@@ -199,11 +279,16 @@ def json_output(matches: Sequence[Match], card_count: int) -> str:
                 "source_type": item.card.source_type,
                 "card_type": item.card.card_type,
                 "original_text": item.card.original_text,
+                "original_language": item.card.original_language,
+                "original_quality": item.card.original_quality,
                 "recognition": item.card.recognition,
+                "scene_id": item.card.scene_id,
+                "interaction_function": item.card.interaction_function,
                 "content": item.card.block,
             }
             for item in matches
         ],
+        "related_rules": rules,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
 
@@ -215,9 +300,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--user-state", default="")
     parser.add_argument("--emotion", default="")
     parser.add_argument("--intent", default="")
+    parser.add_argument("--speech-act", default="")
+    parser.add_argument("--trigger", default="")
     parser.add_argument("--relation", default="")
     parser.add_argument("--risk", default="")
-    parser.add_argument("--language", default="")
+    parser.add_argument("--language", default="", help="输出语言；不用于过滤原语言语料")
+    parser.add_argument("--source-language", default="", help="仅在需要时限制原文语言")
     parser.add_argument("--limit", type=int, default=5, choices=range(3, 7), metavar="3..6")
     parser.add_argument("--exclude", action="append", default=[], help="排除编号，可重复或用逗号分隔")
     parser.add_argument("--format", choices=("markdown", "json", "ids"), default="markdown")
@@ -240,9 +328,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "user_state": args.user_state,
         "emotion": args.emotion,
         "intent": args.intent,
+        "speech_act": args.speech_act,
+        "trigger": args.trigger,
         "relation": args.relation,
         "risk": args.risk,
-        "language": args.language,
+        "source_language": args.source_language,
     }
     excluded = parse_excludes(args.exclude)
     matches = [
@@ -253,12 +343,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if match is not None
     ]
     selected = choose_matches(matches, min(args.limit, len(matches)))
+    rules = related_rules(root, selected)
     if args.format == "json":
-        print(json_output(selected, len(cards)), end="")
+        print(json_output(selected, len(cards), rules), end="")
     elif args.format == "ids":
         print("\n".join(item.card.card_id for item in selected))
     else:
-        print(markdown_output(selected, len(cards)), end="")
+        print(markdown_output(selected, len(cards), rules), end="")
     return 0
 
 
