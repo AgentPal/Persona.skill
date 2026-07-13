@@ -62,6 +62,7 @@ def build_fixture(
     card_count: int,
     original_count: int = 0,
     original_short_lines: int = 0,
+    research_status: str = "达标",
 ) -> None:
     shutil.copytree(ROOT / "assets" / "角色人格模板", target)
     replacements = {
@@ -119,9 +120,49 @@ def build_fixture(
 - 支持的结论或卡片：TESTROLE-{index:04d}
 """
         )
+    if research_status == "已穷尽":
+        coverage = """## 调研覆盖记录
+
+- 调研状态：已穷尽
+- 初始检索范围：官方角色页与作品页
+- 扩大范围记录：继续检查分集资料、访谈、别名和多语言页面
+- 检查的站点与资料类型：官方页、剧情页、访谈、对白资料
+- 检查的版本、别名与语言：动画与漫画版本、中日英名称
+- 各轮新增结果：首轮 12 张，扩大后新增 8 张，此后无新增
+- 未达到目标的指标与原因：公开可核查资料总量不足，卡片与短句未达目标
+
+### RESEARCH-01 | 初始范围
+
+- 查询词、站点、资料类型与语言：角色名、官方页、中文和日文
+- 新增来源与卡片：新增 12 张
+- 未覆盖指标：卡片和原作短句不足
+
+### RESEARCH-02 | 扩大范围
+
+- 查询词、站点、资料类型与语言：别名、英文名、访谈、分集资料和对白
+- 新增来源与卡片：新增 8 张，此后无新增
+- 未覆盖指标：全网合理可访问资料仍不足
+"""
+    else:
+        coverage = """## 调研覆盖记录
+
+- 调研状态：达标
+- 初始检索范围：官方资料与可核查场景
+- 扩大范围记录：无（初始范围已达标）
+- 检查的站点与资料类型：官方页、剧情页、对白资料
+- 检查的版本、别名与语言：主要版本与中日文名称
+- 各轮新增结果：首轮达到全部资料目标
+- 未达到目标的指标与原因：无
+
+### RESEARCH-01 | 初始范围
+
+- 查询词、站点、资料类型与语言：角色名、官方页、剧情页、中文和日文
+- 新增来源与卡片：达到全部资料目标
+- 未覆盖指标：无
+"""
     write_text(
         target / "references" / "08-来源索引.md",
-        "# 测试角色来源索引\n\n" + "\n".join(source_entries),
+        "# 测试角色来源索引\n\n" + coverage + "\n" + "\n".join(source_entries),
     )
 
 
@@ -216,7 +257,7 @@ class PersonaToolTests(unittest.TestCase):
             self.assertGreaterEqual(len(high_risk["selected"]), 3)
             self.assertTrue(all("risk=high" in item["content"] for item in high_risk["selected"]))
 
-    def test_existing_character_with_twenty_cards_is_not_release(self) -> None:
+    def test_existing_character_below_target_requires_expansion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "small-role"
             build_fixture(role, "existing-character", 20, 10, 5)
@@ -226,6 +267,39 @@ class PersonaToolTests(unittest.TestCase):
             self.assertIn("dialogue.too_few", codes)
             self.assertIn("dialogue.original_cards_low", codes)
             self.assertIn("dialogue.original_quotes_low", codes)
+
+    def test_exhausted_research_releases_all_available_material(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "exhausted-role"
+            build_fixture(role, "existing-character", 20, 10, 5, research_status="已穷尽")
+            result = persona_tool.validate_skill(role, "release")
+            self.assertTrue(result["valid"], result["issues"])
+            self.assertEqual(result["metrics"]["version"], "正式版")
+            self.assertEqual(result["metrics"]["research_status"], "已穷尽")
+            self.assertEqual(result["metrics"]["coverage_path"], "exhausted")
+            warning_codes = {
+                issue["code"] for issue in result["issues"] if issue["severity"] == "warning"
+            }
+            self.assertIn("dialogue.too_few", warning_codes)
+            self.assertIn("dialogue.original_cards_low", warning_codes)
+
+    def test_exhausted_status_requires_real_expansion_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "false-exhaustion"
+            build_fixture(role, "existing-character", 20, 10, 5, research_status="已穷尽")
+            source_path = role / "references" / "08-来源索引.md"
+            source_text = source_path.read_text(encoding="utf-8")
+            write_text(
+                source_path,
+                source_text.replace(
+                    "- 扩大范围记录：继续检查分集资料、访谈、别名和多语言页面",
+                    "- 扩大范围记录：无",
+                ),
+            )
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("research.exhaustion_incomplete", codes)
 
     def test_original_cards_must_reference_original_sources(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -246,6 +320,15 @@ class PersonaToolTests(unittest.TestCase):
             build_fixture(role, "original-persona", 20)
             result = persona_tool.validate_skill(role, "release")
             self.assertTrue(result["valid"], result["issues"])
+
+    def test_creator_enforces_name_gate_prefix_and_formal_only_delivery(self) -> None:
+        creator = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("第一条回复只能显示下面的二选一提示", creator)
+        self.assertIn("在收到 `1` 或 `2 + 自定义名称` 前", creator)
+        self.assertIn("创建过程中的所有 Agent 自然语言消息都必须以 `<角色名>：` 开头", creator)
+        self.assertIn("最终版本始终为正式版", creator)
+        self.assertIn("不按版权类别、文本长度或资料完整度限制收集", creator)
+        self.assertNotIn("试用版", creator)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,7 @@ CARD_HEADING_RE = re.compile(
 SCENE_HEADING_RE = re.compile(r"^##\s+([a-z][a-z-]*)\s+\|", re.MULTILINE)
 CASE_HEADING_RE = re.compile(r"^##\s+CASE-\d{2}\s+\|", re.MULTILINE)
 SOURCE_HEADING_RE = re.compile(r"^##\s+(SRC-\d{4})\s*$", re.MULTILINE | re.IGNORECASE)
+RESEARCH_HEADING_RE = re.compile(r"^###\s+(RESEARCH-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 PLACEHOLDER_RE = re.compile(
     r"\{\{[A-Z0-9_]+\}\}|\[待填写[^\]]*\]|\b(?:TODO|TBD)\b", re.IGNORECASE
 )
@@ -90,7 +91,7 @@ REQUIRED_SCENES = {
 }
 
 REQUIRED_SKILL_TERMS = ("回复前缀", "每条由 Agent 编写", "每轮加载", "对白使用", "事实保护", "停用与恢复")
-REQUIRED_CORE_TERMS = ("身份", "回复前缀", "人格内核", "与用户的关系", "基本声纹", "工作边界")
+REQUIRED_CORE_TERMS = ("身份", "版本", "回复前缀", "创建后当前会话默认启用", "人格内核", "与用户的关系", "基本声纹", "工作边界")
 TEXT_SUFFIXES = {".md", ".yaml", ".yml", ".txt", ".json"}
 
 
@@ -167,8 +168,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"错误：创建失败：{exc}", file=sys.stderr)
         return 1
 
-    print(f"已创建角色人格 Skill 草稿：{target}")
-    print("下一步：填写全部 [待填写] 内容，扩充对白卡片，然后运行 release 校验。")
+    print(f"已创建角色人格 Skill 工作目录：{target}")
+    print("下一步：填写全部 [待填写] 内容，完成并扩大调研直到达标或已穷尽，然后运行 release 校验。")
     return 0
 
 
@@ -212,11 +213,31 @@ def iter_source_blocks(text: str) -> Iterable[tuple[str, str]]:
         yield match.group(1).upper(), text[match.end() : end]
 
 
+def iter_research_blocks(text: str) -> Iterable[tuple[str, str]]:
+    matches = list(RESEARCH_HEADING_RE.finditer(text))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        yield match.group(1).upper(), text[match.end() : end]
+
+
 def has_representative_short_line(value: str | None) -> bool:
     if not value or PLACEHOLDER_RE.search(value):
         return False
     normalized = value.strip().strip("`'\"“”‘’").lower()
     return bool(normalized) and normalized not in {"无", "none", "n/a", "不适用"} and not normalized.startswith("无（")
+
+
+def has_substantive_value(value: str | None, allow_none: bool = False) -> bool:
+    if not value or PLACEHOLDER_RE.search(value):
+        return False
+    normalized = value.strip().lower()
+    if not normalized:
+        return False
+    if normalized in {"已填写", "待填写", "待确认", "unknown"}:
+        return False
+    if not allow_none and (normalized in {"无", "none", "n/a", "不适用"} or normalized.startswith("无（")):
+        return False
+    return True
 
 
 def extract_reply_prefix(text: str) -> str | None:
@@ -228,6 +249,11 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     issues: list[Issue] = []
     metrics = {
         "persona_type": "unknown",
+        "version": "unknown",
+        "research_status": "unknown",
+        "coverage_path": "unknown",
+        "research_expansion_recorded": False,
+        "research_rounds": 0,
         "cards": 0,
         "original_cards": 0,
         "original_dialogue_cards": 0,
@@ -283,6 +309,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     core_path = root / "references" / "01-角色核心.md"
     core_prefix: str | None = None
     persona_type = "unknown"
+    formal_version = "unknown"
     if core_path.is_file():
         core_text = read_text(core_path)
         for term in REQUIRED_CORE_TERMS:
@@ -303,7 +330,77 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 core_path,
                 root,
             )
+        raw_version = field_value(core_text, "版本")
+        if raw_version and not PLACEHOLDER_RE.search(raw_version):
+            formal_version = raw_version.strip()
+        if level == "release" and formal_version != "正式版":
+            add_issue(
+                issues,
+                "error",
+                "persona.version_invalid",
+                "最终角色人格的版本必须明确写为“正式版”",
+                core_path,
+                root,
+            )
     metrics["persona_type"] = persona_type
+    metrics["version"] = formal_version
+
+    sources_path = root / "references" / "08-来源索引.md"
+    sources_text = read_text(sources_path) if sources_path.is_file() else ""
+    research_status = field_value(sources_text, "调研状态") or "unknown"
+    research_blocks = list(iter_research_blocks(sources_text))
+    research_rounds = len(research_blocks)
+    research_rounds_complete = all(
+        all(
+            has_substantive_value(field_value(block, field), allow_none=True)
+            for field in ("查询词、站点、资料类型与语言", "新增来源与卡片", "未覆盖指标")
+        )
+        for _, block in research_blocks
+    )
+    expansion_record = field_value(sources_text, "扩大范围记录")
+    research_fields = {
+        "初始检索范围": field_value(sources_text, "初始检索范围"),
+        "检查的站点与资料类型": field_value(sources_text, "检查的站点与资料类型"),
+        "检查的版本、别名与语言": field_value(sources_text, "检查的版本、别名与语言"),
+        "各轮新增结果": field_value(sources_text, "各轮新增结果"),
+        "未达到目标的指标与原因": field_value(sources_text, "未达到目标的指标与原因"),
+    }
+    expansion_recorded = has_substantive_value(expansion_record)
+    exhaustion_complete = (
+        research_status == "已穷尽"
+        and expansion_recorded
+        and research_rounds >= 2
+        and research_rounds_complete
+        and all(has_substantive_value(value) for value in research_fields.values())
+    )
+    if level == "release" and research_status not in {"达标", "已穷尽"}:
+        add_issue(
+            issues,
+            "error",
+            "research.status_invalid",
+            "调研状态必须是“达标”或“已穷尽”",
+            sources_path,
+            root,
+        )
+    if level == "release" and research_status == "已穷尽" and not exhaustion_complete:
+        missing = [name for name, value in research_fields.items() if not has_substantive_value(value)]
+        if not expansion_recorded:
+            missing.insert(0, "扩大范围记录")
+        if research_rounds < 2:
+            missing.insert(0, "至少两个 RESEARCH 调研轮次")
+        elif not research_rounds_complete:
+            missing.insert(0, "RESEARCH 调研轮次的查询、结果或缺口字段")
+        add_issue(
+            issues,
+            "error",
+            "research.exhaustion_incomplete",
+            "已穷尽必须包含至少一次实质扩大及完整覆盖记录，缺少：" + ", ".join(missing),
+            sources_path,
+            root,
+        )
+    metrics["research_status"] = research_status
+    metrics["research_expansion_recorded"] = expansion_recorded
+    metrics["research_rounds"] = research_rounds
 
     if skill_prefix and core_prefix and skill_prefix != core_prefix:
         add_issue(
@@ -432,21 +529,22 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         "composite-original": (20, 8),
     }
     min_cards, min_dimensions = release_thresholds.get(persona_type, (20, 8)) if level == "release" else (1, 1)
+    target_severity = "warning" if exhaustion_complete else ("error" if level == "release" else "warning")
     if len(all_ids) < min_cards:
         add_issue(
             issues,
-            "error" if level == "release" else "warning",
+            target_severity,
             "dialogue.too_few",
-            f"对白卡片为 {len(all_ids)} 张，{level} 级至少需要 {min_cards} 张",
+            f"对白卡片为 {len(all_ids)} 张，{persona_type} 正式版收集目标为 {min_cards} 张",
             root / "references",
             root,
         )
     if level == "release" and len(dimensions) < min_dimensions:
         add_issue(
             issues,
-            "error",
+            target_severity,
             "dialogue.coverage_low",
-            f"情绪与交流目的合计仅 {len(dimensions)} 种，{persona_type} 发布版至少需要 {min_dimensions} 种",
+            f"情绪与交流目的合计仅 {len(dimensions)} 种，{persona_type} 正式版收集目标为 {min_dimensions} 种",
             root / "references",
             root,
         )
@@ -506,8 +604,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             root,
         )
 
-    sources_path = root / "references" / "08-来源索引.md"
-    source_blocks = list(iter_source_blocks(read_text(sources_path))) if sources_path.is_file() else []
+    source_blocks = list(iter_source_blocks(sources_text)) if sources_text else []
     source_ids = [source_id for source_id, _ in source_blocks]
     source_count = len(source_ids)
     metrics["sources"] = source_count
@@ -553,39 +650,59 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         if len(verified_original_card_ids) < 40:
             add_issue(
                 issues,
-                "error",
+                target_severity,
                 "dialogue.original_cards_low",
-                f"经来源核对的原作明确场景卡仅 {len(verified_original_card_ids)} 张，现有作品角色发布版至少需要 40 张",
+                f"经来源核对的原作明确场景卡仅 {len(verified_original_card_ids)} 张，现有作品角色正式版收集目标为 40 张",
                 root / "references",
                 root,
             )
         if len(verified_original_dialogue_ids) < 20:
             add_issue(
                 issues,
-                "error",
+                target_severity,
                 "dialogue.original_quotes_low",
-                f"经来源核对且含代表性原作短句的卡片仅 {len(verified_original_dialogue_ids)} 张，现有作品角色发布版至少需要 20 张",
+                f"经来源核对且含代表性原作短句的卡片仅 {len(verified_original_dialogue_ids)} 张，现有作品角色正式版收集目标为 20 张",
                 root / "references",
                 root,
             )
         if source_count < 5:
             add_issue(
                 issues,
-                "error",
+                target_severity,
                 "sources.too_few",
-                f"来源条目仅 {source_count} 个，现有作品角色发布版至少需要 5 个",
+                f"来源条目仅 {source_count} 个，现有作品角色正式版收集目标为 5 个",
                 sources_path,
                 root,
             )
         if len(supporting_original_sources) < 3:
             add_issue(
                 issues,
-                "error",
+                target_severity,
                 "sources.original_too_few",
-                f"被原作卡片实际引用的原作明确来源仅 {len(supporting_original_sources)} 个，现有作品角色发布版至少需要 3 个",
+                f"被原作卡片实际引用的原作明确来源仅 {len(supporting_original_sources)} 个，现有作品角色正式版收集目标为 3 个",
                 sources_path,
                 root,
             )
+    target_met = False
+    if persona_type == "existing-character":
+        target_met = (
+            len(all_ids) >= 80
+            and len(dimensions) >= 12
+            and len(verified_original_card_ids) >= 40
+            and len(verified_original_dialogue_ids) >= 20
+            and source_count >= 5
+            and len(supporting_original_sources) >= 3
+        )
+    elif persona_type == "real-person-simulation":
+        target_met = len(all_ids) >= 40 and len(dimensions) >= 10
+    elif persona_type in {"original-persona", "composite-original"}:
+        target_met = len(all_ids) >= 20 and len(dimensions) >= 8
+    if target_met:
+        metrics["coverage_path"] = "target-met"
+    elif exhaustion_complete:
+        metrics["coverage_path"] = "exhausted"
+    else:
+        metrics["coverage_path"] = "incomplete"
     unknown_source_ids = sorted(referenced_source_ids - set(source_ids))
     if unknown_source_ids:
         add_issue(
@@ -659,6 +776,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
         print(f"[{status}] {result['path']}")
         print(
             f"level={result['level']} persona_type={metrics['persona_type']} "
+            f"version={metrics['version']} research_status={metrics['research_status']} "
+            f"coverage_path={metrics['coverage_path']} research_rounds={metrics['research_rounds']} "
             f"cards={metrics['cards']} original_cards={metrics['original_cards']} "
             f"original_dialogue_cards={metrics['original_dialogue_cards']} "
             f"derived_cards={metrics['derived_cards']} "
@@ -678,7 +797,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    init_parser = subparsers.add_parser("init", help="从标准模板创建角色人格 Skill 草稿")
+    init_parser = subparsers.add_parser("init", help="从标准模板创建角色人格 Skill 工作目录")
     init_parser.add_argument("--name", required=True, help="角色显示名")
     init_parser.add_argument("--slug", required=True, help="小写连字符 Skill 标识")
     init_parser.add_argument("--output", required=True, help="要创建的目标目录；必须不存在")
@@ -687,7 +806,7 @@ def build_parser() -> argparse.ArgumentParser:
     validate_parser = subparsers.add_parser("validate", help="校验角色人格 Skill")
     validate_parser.add_argument("path", help="角色人格 Skill 目录")
     validate_parser.add_argument(
-        "--level", choices=("draft", "release"), default="release", help="校验级别，默认 release"
+        "--level", choices=("draft", "release"), default="release", help="校验级别；draft 仅供内部迭代，最终只能交付 release"
     )
     validate_parser.add_argument("--json", action="store_true", help="输出 JSON 结果")
     validate_parser.set_defaults(func=cmd_validate)
