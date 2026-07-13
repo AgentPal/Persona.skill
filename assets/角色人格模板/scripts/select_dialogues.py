@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -26,7 +27,7 @@ WEIGHTS = {
 }
 HIGH_RISKS = {"high", "critical", "danger", "severe"}
 LOW_RISKS = {"none", "low"}
-EMPTY_SHORT_LINES = {"", "无", "none", "n/a", "不适用"}
+SIGNATURE_LEVELS = {"核心", "常用"}
 
 
 @dataclass(frozen=True)
@@ -36,7 +37,9 @@ class Card:
     block: str
     tags: Dict[str, Set[str]]
     source_type: str
-    short_line: str
+    card_type: str
+    original_text: str
+    recognition: str
 
 
 @dataclass(frozen=True)
@@ -96,7 +99,9 @@ def load_cards(root: Path) -> List[Card]:
                     block=block,
                     tags=parse_tags(block),
                     source_type=field_value(block, "来源类型"),
-                    short_line=field_value(block, "代表性短句"),
+                    card_type=field_value(block, "卡片类型"),
+                    original_text=field_value(block, "原文"),
+                    recognition=field_value(block, "识别度"),
                 )
             )
     return cards
@@ -147,30 +152,15 @@ def score_card(card: Card, query: Dict[str, str]) -> Optional[Match]:
             matched.append(key)
 
     if card.source_type == "原作明确":
-        score += 1
-    if card.short_line.strip().lower() not in EMPTY_SHORT_LINES:
+        score += 2
+    if card.recognition in SIGNATURE_LEVELS:
         score += 1
     return Match(card=card, score=score, matched=tuple(matched))
 
 
 def choose_matches(matches: Sequence[Match], limit: int) -> List[Match]:
     ranked = sorted(matches, key=lambda item: (-item.score, item.card.card_id))
-    if limit < 2:
-        return ranked[:limit]
-
-    chosen: List[Match] = []
-    competitive = [item for item in ranked if item.score >= ranked[0].score - 8] if ranked else []
-    original = next((item for item in competitive if item.card.source_type == "原作明确"), None)
-    derived = next((item for item in competitive if item.card.source_type != "原作明确"), None)
-    for candidate in (original, derived):
-        if candidate is not None and candidate not in chosen:
-            chosen.append(candidate)
-    for candidate in ranked:
-        if candidate not in chosen:
-            chosen.append(candidate)
-        if len(chosen) >= limit:
-            break
-    return sorted(chosen[:limit], key=lambda item: (-item.score, item.card.card_id))
+    return ranked[:limit]
 
 
 def parse_excludes(values: Sequence[str]) -> Set[str]:
@@ -207,6 +197,9 @@ def json_output(matches: Sequence[Match], card_count: int) -> str:
                 "matched": list(item.matched),
                 "source_file": item.card.source_file,
                 "source_type": item.card.source_type,
+                "card_type": item.card.card_type,
+                "original_text": item.card.original_text,
+                "recognition": item.card.recognition,
                 "content": item.card.block,
             }
             for item in matches
@@ -232,6 +225,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
     args = build_parser().parse_args(argv)
     root = Path(args.root).expanduser().resolve()
     cards = load_cards(root)

@@ -43,25 +43,35 @@ REQUIRED_FILES = (
 
 REQUIRED_CARD_FIELDS = (
     "检索标签",
+    "卡片类型",
+    "原文",
+    "原文语言",
+    "中文参考译文",
+    "说话人",
     "来源类型",
     "来源位置",
-    "原场景",
+    "作品定位",
+    "场景编号",
+    "前置语境",
+    "触发话语",
     "对话对象",
     "关系距离",
     "交流目的",
     "主要情绪",
     "情绪强度",
-    "语言特征",
-    "代表性短句",
-    "表达结构",
-    "适用工作场景",
-    "迁移方式",
-    "工作改写示例",
+    "口语特征",
+    "句式与节奏",
+    "识别度",
+    "可直接使用",
     "不适用场景",
     "重复限制",
 )
 
 ALLOWED_SOURCE_TYPES = {"原作明确", "用户补充", "公开资料", "合理推导", "Persona.skill 补齐"}
+EXACT_CARD_TYPES = {"原文对白", "原文口头禅", "原文独白", "原文发言"}
+AUTHORED_CARD_TYPES = {"原创规范对白"}
+ALLOWED_CARD_TYPES = EXACT_CARD_TYPES | AUTHORED_CARD_TYPES
+SIGNATURE_LEVELS = {"核心", "常用"}
 ALLOWED_PERSONA_TYPES = {
     "existing-character",
     "original-persona",
@@ -69,7 +79,6 @@ ALLOWED_PERSONA_TYPES = {
     "composite-original",
 }
 ALLOWED_INDEX_SOURCE_TYPES = ALLOWED_SOURCE_TYPES
-ALLOWED_MIGRATIONS = {"直接使用", "修改后使用", "仅作风格参考"}
 REQUIRED_TAGS = {"task_state", "user_state", "emotion", "intent", "relation", "risk", "language"}
 
 REQUIRED_SCENES = {
@@ -220,11 +229,16 @@ def iter_research_blocks(text: str) -> Iterable[tuple[str, str]]:
         yield match.group(1).upper(), text[match.end() : end]
 
 
-def has_representative_short_line(value: str | None) -> bool:
+def has_exact_original_text(value: str | None) -> bool:
     if not value or PLACEHOLDER_RE.search(value):
         return False
     normalized = value.strip().strip("`'\"“”‘’").lower()
     return bool(normalized) and normalized not in {"无", "none", "n/a", "不适用"} and not normalized.startswith("无（")
+
+
+def normalize_original_text(value: str) -> str:
+    """Normalize only for duplicate detection; keep the stored original untouched."""
+    return re.sub(r"[\W_]+", "", value, flags=re.UNICODE).casefold()
 
 
 def has_substantive_value(value: str | None, allow_none: bool = False) -> bool:
@@ -255,8 +269,10 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         "research_expansion_recorded": False,
         "research_rounds": 0,
         "cards": 0,
-        "original_cards": 0,
-        "original_dialogue_cards": 0,
+        "exact_original_cards": 0,
+        "canonical_authored_cards": 0,
+        "distinct_source_scenes": 0,
+        "signature_cards": 0,
         "derived_cards": 0,
         "distinct_emotions_and_intents": 0,
         "work_scenes": 0,
@@ -442,7 +458,12 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     referenced_source_ids: set[str] = set()
     original_referenced_source_ids: set[str] = set()
     original_card_sources: dict[str, set[str]] = {}
-    original_short_card_ids: set[str] = set()
+    exact_original_card_ids: set[str] = set()
+    canonical_authored_card_ids: set[str] = set()
+    distinct_source_scenes: set[str] = set()
+    signature_card_ids: set[str] = set()
+    normalized_original_owners: dict[str, str] = {}
+    noncanonical_card_ids: set[str] = set()
     for path in library_paths:
         text = read_text(path)
         for card_id, block in iter_card_blocks(text):
@@ -457,6 +478,86 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     add_issue(issues, "error", "dialogue.field_missing", f"{card_id} 缺少字段：{field}", path, root)
                 elif field in {"交流目的", "主要情绪"}:
                     dimensions.update(split_values(value))
+            card_type = field_value(block, "卡片类型")
+            if card_type and not PLACEHOLDER_RE.search(card_type) and card_type not in ALLOWED_CARD_TYPES:
+                add_issue(
+                    issues,
+                    "error",
+                    "dialogue.card_type_invalid",
+                    f"{card_id} 的卡片类型无效：{card_type}",
+                    path,
+                    root,
+                )
+            if persona_type in {"existing-character", "real-person-simulation"}:
+                if card_type and not PLACEHOLDER_RE.search(card_type) and card_type not in EXACT_CARD_TYPES:
+                    add_issue(
+                        issues,
+                        "error",
+                        "dialogue.non_original_card",
+                        f"{card_id} 不是逐字原文卡；现有角色对白库禁止用摘要、推导或工作改写充数",
+                        path,
+                        root,
+                    )
+                    noncanonical_card_ids.add(card_id)
+            elif card_type and not PLACEHOLDER_RE.search(card_type) and card_type not in AUTHORED_CARD_TYPES:
+                add_issue(
+                    issues,
+                    "error",
+                    "dialogue.noncanonical_authored_card",
+                    f"{card_id} 不是原创人格的规范对白卡",
+                    path,
+                    root,
+                )
+                noncanonical_card_ids.add(card_id)
+
+            original_text = field_value(block, "原文")
+            if card_type in EXACT_CARD_TYPES:
+                if not has_exact_original_text(original_text):
+                    add_issue(
+                        issues,
+                        "error",
+                        "dialogue.original_text_missing",
+                        f"{card_id} 没有可用的逐字原文；场景摘要不能替代原文",
+                        path,
+                        root,
+                    )
+                    noncanonical_card_ids.add(card_id)
+                else:
+                    normalized = normalize_original_text(original_text or "")
+                    previous = normalized_original_owners.get(normalized)
+                    if previous:
+                        add_issue(
+                            issues,
+                            "error" if level == "release" else "warning",
+                            "dialogue.duplicate_original_text",
+                            f"{card_id} 与 {previous} 保存了相同原文；重复出现应合并来源定位，不能重复计数",
+                            path,
+                            root,
+                        )
+                        noncanonical_card_ids.add(card_id)
+                    else:
+                        normalized_original_owners[normalized] = card_id
+                        exact_original_card_ids.add(card_id)
+            elif card_type in AUTHORED_CARD_TYPES and has_exact_original_text(original_text):
+                canonical_authored_card_ids.add(card_id)
+
+            scene_id = field_value(block, "场景编号")
+            if card_id in exact_original_card_ids and has_substantive_value(scene_id):
+                distinct_source_scenes.add((scene_id or "").strip())
+            recognition = field_value(block, "识别度")
+            if card_id in exact_original_card_ids and recognition in SIGNATURE_LEVELS:
+                signature_card_ids.add(card_id)
+
+            for forbidden_field in ("工作改写示例", "适用工作场景", "迁移方式"):
+                if field_value(block, forbidden_field) is not None:
+                    add_issue(
+                        issues,
+                        "error",
+                        "dialogue.prewritten_rewrite_forbidden",
+                        f"{card_id} 含旧字段“{forbidden_field}”；工作迁移必须在运行时完成，不得写进原文对白库",
+                        path,
+                        root,
+                    )
             source_type = field_value(block, "来源类型")
             if source_type and not PLACEHOLDER_RE.search(source_type) and source_type not in ALLOWED_SOURCE_TYPES:
                 add_issue(
@@ -467,19 +568,21 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     path,
                     root,
                 )
-            if source_type == "原作明确":
-                if has_representative_short_line(field_value(block, "代表性短句")):
-                    original_short_card_ids.add(card_id)
-            migration = field_value(block, "迁移方式")
-            if migration and not PLACEHOLDER_RE.search(migration) and migration not in ALLOWED_MIGRATIONS:
+            if (
+                persona_type in {"existing-character", "real-person-simulation"}
+                and source_type
+                and not PLACEHOLDER_RE.search(source_type)
+                and source_type != "原作明确"
+            ):
                 add_issue(
                     issues,
                     "error",
-                    "dialogue.migration_invalid",
-                    f"{card_id} 的迁移方式无效：{migration}",
+                    "dialogue.source_not_original",
+                    f"{card_id} 的来源类型是“{source_type}”；现有角色对白库只接受已核对的原作明确内容",
                     path,
                     root,
                 )
+                noncanonical_card_ids.add(card_id)
             intensity = field_value(block, "情绪强度")
             if intensity and not PLACEHOLDER_RE.search(intensity) and not re.fullmatch(r"[0-3]", intensity):
                 add_issue(
@@ -507,7 +610,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             source_refs = set(re.findall(r"\bSRC-\d{4}\b", source_location or "", re.IGNORECASE))
             normalized_source_refs = {item.upper() for item in source_refs}
             referenced_source_ids.update(normalized_source_refs)
-            if source_type == "原作明确":
+            if card_id in exact_original_card_ids and source_type == "原作明确":
                 original_referenced_source_ids.update(normalized_source_refs)
                 original_card_sources[card_id] = normalized_source_refs
             if source_location and not PLACEHOLDER_RE.search(source_location) and not source_refs:
@@ -519,8 +622,18 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     path,
                     root,
                 )
+            if persona_type in {"existing-character", "real-person-simulation"}:
+                if card_id not in exact_original_card_ids:
+                    noncanonical_card_ids.add(card_id)
+            elif card_id not in canonical_authored_card_ids:
+                noncanonical_card_ids.add(card_id)
 
     metrics["cards"] = len(all_ids)
+    metrics["exact_original_cards"] = len(exact_original_card_ids)
+    metrics["canonical_authored_cards"] = len(canonical_authored_card_ids)
+    metrics["distinct_source_scenes"] = len(distinct_source_scenes)
+    metrics["signature_cards"] = len(signature_card_ids)
+    metrics["derived_cards"] = len(noncanonical_card_ids)
     metrics["distinct_emotions_and_intents"] = len(dimensions)
     release_thresholds = {
         "existing-character": (80, 12),
@@ -630,10 +743,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     verified_original_card_ids = {
         card_id for card_id, source_refs in original_card_sources.items() if source_refs & original_source_ids
     }
-    verified_original_dialogue_ids = verified_original_card_ids & original_short_card_ids
-    metrics["original_cards"] = len(verified_original_card_ids)
-    metrics["original_dialogue_cards"] = len(verified_original_dialogue_ids)
-    metrics["derived_cards"] = len(all_ids) - len(verified_original_card_ids)
+    metrics["exact_original_cards"] = len(verified_original_card_ids)
     metrics["original_sources"] = len(supporting_original_sources)
     unverified_original_card_ids = sorted(set(original_card_sources) - verified_original_card_ids)
     if unverified_original_card_ids:
@@ -647,21 +757,30 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             root,
         )
     if level == "release" and persona_type == "existing-character":
-        if len(verified_original_card_ids) < 40:
+        if len(verified_original_card_ids) < 80:
             add_issue(
                 issues,
                 target_severity,
-                "dialogue.original_cards_low",
-                f"经来源核对的原作明确场景卡仅 {len(verified_original_card_ids)} 张，现有作品角色正式版收集目标为 40 张",
+                "dialogue.exact_original_cards_low",
+                f"经来源核对且含逐字原文的卡片仅 {len(verified_original_card_ids)} 张，现有作品角色正式版收集目标为 80 张",
                 root / "references",
                 root,
             )
-        if len(verified_original_dialogue_ids) < 20:
+        if len(distinct_source_scenes) < 40:
             add_issue(
                 issues,
                 target_severity,
-                "dialogue.original_quotes_low",
-                f"经来源核对且含代表性原作短句的卡片仅 {len(verified_original_dialogue_ids)} 张，现有作品角色正式版收集目标为 20 张",
+                "dialogue.source_scenes_low",
+                f"逐字原文卡仅覆盖 {len(distinct_source_scenes)} 个不同原作场景，正式版收集目标为 40 个",
+                root / "references",
+                root,
+            )
+        if len(signature_card_ids) < 20:
+            add_issue(
+                issues,
+                target_severity,
+                "dialogue.signature_cards_low",
+                f"核心或常用原文卡仅 {len(signature_card_ids)} 张，正式版收集目标为 20 张",
                 root / "references",
                 root,
             )
@@ -688,8 +807,9 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         target_met = (
             len(all_ids) >= 80
             and len(dimensions) >= 12
-            and len(verified_original_card_ids) >= 40
-            and len(verified_original_dialogue_ids) >= 20
+            and len(verified_original_card_ids) >= 80
+            and len(distinct_source_scenes) >= 40
+            and len(signature_card_ids) >= 20
             and source_count >= 5
             and len(supporting_original_sources) >= 3
         )
@@ -778,8 +898,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
             f"level={result['level']} persona_type={metrics['persona_type']} "
             f"version={metrics['version']} research_status={metrics['research_status']} "
             f"coverage_path={metrics['coverage_path']} research_rounds={metrics['research_rounds']} "
-            f"cards={metrics['cards']} original_cards={metrics['original_cards']} "
-            f"original_dialogue_cards={metrics['original_dialogue_cards']} "
+            f"cards={metrics['cards']} exact_original_cards={metrics['exact_original_cards']} "
+            f"distinct_source_scenes={metrics['distinct_source_scenes']} "
+            f"signature_cards={metrics['signature_cards']} "
+            f"canonical_authored_cards={metrics['canonical_authored_cards']} "
             f"derived_cards={metrics['derived_cards']} "
             f"dimensions={metrics['distinct_emotions_and_intents']} "
             f"scenes={metrics['work_scenes']} cases={metrics['validation_cases']} "
@@ -814,6 +936,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)

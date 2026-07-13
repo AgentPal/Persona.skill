@@ -25,7 +25,13 @@ def write_text(path: Path, content: str) -> None:
         handle.write(content)
 
 
-def card_text(index: int, source_type: str, source_id: str, with_short_line: bool) -> str:
+def card_text(
+    index: int,
+    persona_type: str,
+    source_id: str,
+    scene_count: int,
+    signature_count: int,
+) -> str:
     card_id = f"TESTROLE-{index:04d}"
     task_states = ("start", "progress", "waiting", "failed", "risk", "complete", "blocked", "issue")
     user_states = ("normal", "tired", "upset", "excited")
@@ -33,24 +39,34 @@ def card_text(index: int, source_type: str, source_id: str, with_short_line: boo
     intents = ("encourage", "report", "warn", "comfort", "explain", "apologize", "clarify", "celebrate")
     task_state = task_states[(index - 1) % len(task_states)]
     risk = "high" if index % 10 == 0 else "low"
-    short_line = f"经典短句 {index}" if with_short_line else "无"
+    existing = persona_type in {"existing-character", "real-person-simulation"}
+    source_type = "原作明确" if existing else "用户补充"
+    card_type = "原文对白" if existing else "原创规范对白"
+    scene_number = ((index - 1) % max(scene_count, 1)) + 1
+    recognition = "核心" if index <= signature_count else "补充"
     return f"""## {card_id}
 
 - 检索标签：task_state={task_state}; user_state={user_states[(index - 1) % 4]}; emotion={emotions[(index - 1) % 8]}; intent={intents[(index - 1) % 8]}; relation=familiar; risk={risk}; language=zh-CN
+- 卡片类型：{card_type}
+- 原文：{'原作逐字原句' if existing else '原创规范原句'} {index}
+- 原文语言：zh-CN
+- 中文参考译文：不适用
+- 说话人：测试角色
 - 来源类型：{source_type}
 - 来源位置：{source_id}，测试定位 {index}
-- 原场景：测试场景 {index}
+- 作品定位：测试作品第 {scene_number} 场，位置 {index}
+- 场景编号：SCENE-{scene_number:04d}
+- 前置语境：测试语境 {index}
+- 触发话语：测试触发 {index}
 - 对话对象：熟悉的同伴
 - 关系距离：familiar
 - 交流目的：{intents[(index - 1) % 8]}
 - 主要情绪：{emotions[(index - 1) % 8]}
 - 情绪强度：2
-- 语言特征：短句，先回应情绪再行动
-- 代表性短句：{short_line}
-- 表达结构：回应场景，再说明行动
-- 适用工作场景：{task_state}
-- 迁移方式：修改后使用
-- 工作改写示例：角色名：测试改写 {index}
+- 口语特征：短句，先回应情绪再行动
+- 句式与节奏：回应场景，再说明行动
+- 识别度：{recognition}
+- 可直接使用：视场景
 - 不适用场景：事实未确认时
 - 重复限制：最近五轮不重复
 """
@@ -60,8 +76,8 @@ def build_fixture(
     target: Path,
     persona_type: str,
     card_count: int,
-    original_count: int = 0,
-    original_short_lines: int = 0,
+    scene_count: int = 0,
+    signature_count: int = 0,
     research_status: str = "达标",
 ) -> None:
     shutil.copytree(ROOT / "assets" / "角色人格模板", target)
@@ -83,13 +99,11 @@ def build_fixture(
     cards = []
     index_rows = []
     for index in range(1, card_count + 1):
-        is_original = index <= original_count
-        source_type = "原作明确" if is_original else "合理推导"
-        if is_original:
+        if persona_type in {"existing-character", "real-person-simulation"}:
             source_id = f"SRC-{((index - 1) % 3) + 1:04d}"
         else:
-            source_id = "SRC-0004" if persona_type == "existing-character" else "SRC-0001"
-        cards.append(card_text(index, source_type, source_id, index <= original_short_lines))
+            source_id = "SRC-0001"
+        cards.append(card_text(index, persona_type, source_id, scene_count, signature_count))
         index_rows.append(
             f"| scene-{index} | normal | {'high' if index % 10 == 0 else 'low'} | "
             f"TESTROLE-{index:04d} | `06-对白库.md` | test |"
@@ -129,13 +143,13 @@ def build_fixture(
 - 检查的站点与资料类型：官方页、剧情页、访谈、对白资料
 - 检查的版本、别名与语言：动画与漫画版本、中日英名称
 - 各轮新增结果：首轮 12 张，扩大后新增 8 张，此后无新增
-- 未达到目标的指标与原因：公开可核查资料总量不足，卡片与短句未达目标
+- 未达到目标的指标与原因：公开可核查资料总量不足，逐字原文卡与场景覆盖未达目标
 
 ### RESEARCH-01 | 初始范围
 
 - 查询词、站点、资料类型与语言：角色名、官方页、中文和日文
 - 新增来源与卡片：新增 12 张
-- 未覆盖指标：卡片和原作短句不足
+- 未覆盖指标：逐字原文卡和原作场景不足
 
 ### RESEARCH-02 | 扩大范围
 
@@ -200,8 +214,10 @@ class PersonaToolTests(unittest.TestCase):
             result = persona_tool.validate_skill(role, "release")
             self.assertTrue(result["valid"], result["issues"])
             self.assertEqual(result["metrics"]["cards"], 80)
-            self.assertEqual(result["metrics"]["original_cards"], 40)
-            self.assertEqual(result["metrics"]["original_dialogue_cards"], 20)
+            self.assertEqual(result["metrics"]["exact_original_cards"], 80)
+            self.assertEqual(result["metrics"]["distinct_source_scenes"], 40)
+            self.assertEqual(result["metrics"]["signature_cards"], 20)
+            self.assertEqual(result["metrics"]["derived_cards"], 0)
             self.assertEqual(result["metrics"]["original_sources"], 3)
 
             selector = role / "scripts" / "select_dialogues.py"
@@ -229,6 +245,7 @@ class PersonaToolTests(unittest.TestCase):
             self.assertEqual(first["library_cards"], 80)
             self.assertEqual(len(first["selected"]), 5)
             self.assertLess(len(first["selected"]), first["library_cards"])
+            self.assertTrue(all(item["original_text"] for item in first["selected"]))
 
             excluded = first["selected"][0]["card_id"]
             second = json.loads(
@@ -265,8 +282,9 @@ class PersonaToolTests(unittest.TestCase):
             codes = {issue["code"] for issue in result["issues"]}
             self.assertFalse(result["valid"])
             self.assertIn("dialogue.too_few", codes)
-            self.assertIn("dialogue.original_cards_low", codes)
-            self.assertIn("dialogue.original_quotes_low", codes)
+            self.assertIn("dialogue.exact_original_cards_low", codes)
+            self.assertIn("dialogue.source_scenes_low", codes)
+            self.assertIn("dialogue.signature_cards_low", codes)
 
     def test_exhausted_research_releases_all_available_material(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -281,7 +299,7 @@ class PersonaToolTests(unittest.TestCase):
                 issue["code"] for issue in result["issues"] if issue["severity"] == "warning"
             }
             self.assertIn("dialogue.too_few", warning_codes)
-            self.assertIn("dialogue.original_cards_low", warning_codes)
+            self.assertIn("dialogue.exact_original_cards_low", warning_codes)
 
     def test_exhausted_status_requires_real_expansion_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -312,7 +330,41 @@ class PersonaToolTests(unittest.TestCase):
             codes = {issue["code"] for issue in result["issues"]}
             self.assertFalse(result["valid"])
             self.assertIn("dialogue.original_source_mismatch", codes)
-            self.assertIn("dialogue.original_cards_low", codes)
+            self.assertIn("dialogue.exact_original_cards_low", codes)
+
+    def test_existing_character_rejects_missing_original_and_work_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "fake-original"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            library = role / "references" / "06-对白库.md"
+            text = library.read_text(encoding="utf-8")
+            text = text.replace("- 原文：原作逐字原句 1", "- 原文：无", 1)
+            text = text.replace(
+                "- 重复限制：最近五轮不重复",
+                "- 工作改写示例：测试角色：这是预写的工作话术\n- 重复限制：最近五轮不重复",
+                1,
+            )
+            write_text(library, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("dialogue.original_text_missing", codes)
+            self.assertIn("dialogue.prewritten_rewrite_forbidden", codes)
+
+    def test_existing_character_rejects_non_original_and_duplicate_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "derived-dialogue"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            library = role / "references" / "06-对白库.md"
+            text = library.read_text(encoding="utf-8")
+            text = text.replace("- 卡片类型：原文对白", "- 卡片类型：原创规范对白", 1)
+            text = text.replace("- 原文：原作逐字原句 3", "- 原文：原作逐字原句 2", 1)
+            write_text(library, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("dialogue.non_original_card", codes)
+            self.assertIn("dialogue.duplicate_original_text", codes)
 
     def test_original_persona_can_release_with_twenty_cards(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -328,6 +380,9 @@ class PersonaToolTests(unittest.TestCase):
         self.assertIn("创建过程中的所有 Agent 自然语言消息都必须以 `<角色名>：` 开头", creator)
         self.assertIn("最终版本始终为正式版", creator)
         self.assertIn("不按版权类别、文本长度或资料完整度限制收集", creator)
+        self.assertIn("对白库禁止加入官方角色介绍", creator)
+        self.assertIn("逐字原文卡", creator)
+        self.assertNotIn("官方角色原文", persona_tool.EXACT_CARD_TYPES)
         self.assertNotIn("试用版", creator)
 
 
