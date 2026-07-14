@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Select a small, relevant set of dialogue cards from a Persona skill."""
+"""Retrieve source-grounded dialogue evidence and delivery guidance."""
 
 from __future__ import annotations
 
@@ -16,22 +16,29 @@ CARD_HEADING_RE = re.compile(
     r"^##\s+([A-Z0-9][A-Z0-9-]*-\d{4})\s*$", re.MULTILINE | re.IGNORECASE
 )
 RULE_HEADING_RE = re.compile(r"^###\s+((?:CORE|VOICE|MODE|ANTI)-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+SCENE_HEADING_RE = re.compile(r"^##\s+([a-z][a-z-]*)\s+\|", re.MULTILINE)
 TAG_RE = re.compile(r"\b([a-z_]+)\s*=\s*([^;；]+)", re.IGNORECASE)
+MAPPING_RE = re.compile(r"\b([A-Z0-9][A-Z0-9-]*-\d{4})\s*=>\s*([^;；]+)", re.IGNORECASE)
+
+# Only source-scene semantics are scored. Work state, user state, and risk are
+# first routed through references/04-工作场景迁移.md and never stored as proof
+# inside an original dialogue card.
 WEIGHTS = {
-    "speech_act": 10,
-    "trigger": 9,
-    "intent": 7,
-    "risk": 6,
-    "relation": 5,
+    "speech_act": 11,
+    "trigger": 10,
+    "interaction": 9,
+    "position": 7,
+    "relation": 6,
     "emotion": 5,
-    "task_state": 4,
-    "user_state": 2,
+    "initiative": 4,
 }
-HIGH_RISKS = {"high", "critical", "danger", "severe"}
-LOW_RISKS = {"none", "low"}
+STRONG_KEYS = {"speech_act", "trigger", "interaction"}
 SIGNATURE_LEVELS = {"核心", "常用"}
 VERIFIED_LABEL_EVIDENCE = {"原文可见", "上下文可见", "来源明确", "用户确认"}
+VERIFIED_ORIGINAL_QUALITIES = {"原声核验", "原语言文本核验", "原始版式核验", "原创确认"}
+COMPLETE_SCENES = {"完整", "原创设定"}
 CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
+HIGH_RISKS = {"high", "critical", "danger", "severe"}
 
 
 @dataclass(frozen=True)
@@ -47,7 +54,12 @@ class Card:
     original_quality: str
     recognition: str
     scene_id: str
+    scene_completeness: str
     interaction_function: str
+    reaction: str
+    interaction_position: str
+    initiative: str
+    visual_anchor: str
     label_evidence: Dict[str, str]
     previous_text: str
     trigger_text: str
@@ -63,6 +75,13 @@ class Match:
     tier: int
     evidence_level: str
     evidence_gaps: Tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class WorkRoute:
+    scene_id: str
+    query: Dict[str, Set[str]]
+    block: str
 
 
 def read_text(path: Path) -> str:
@@ -82,24 +101,32 @@ def field_value(block: str, field: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def parse_tag_value(value: str) -> Dict[str, Set[str]]:
+    return {key.lower(): split_values(raw) for key, raw in TAG_RE.findall(value)}
+
+
 def parse_tags(block: str) -> Dict[str, Set[str]]:
-    tag_line = field_value(block, "检索标签")
-    return {key.lower(): split_values(value) for key, value in TAG_RE.findall(tag_line)}
+    # Legacy fallback keeps old characters runnable, but release validation
+    # requires 原作检索标签 and rejects work-domain tags in the source card.
+    return parse_tag_value(field_value(block, "原作检索标签") or field_value(block, "检索标签"))
 
 
 def parse_label_evidence(block: str) -> Dict[str, str]:
-    value = field_value(block, "标签依据")
     return {
         key.lower(): raw.strip()
-        for key, raw in TAG_RE.findall(value)
+        for key, raw in TAG_RE.findall(field_value(block, "标签依据"))
     }
+
+
+def parse_evidence_mapping(block: str) -> Dict[str, str]:
+    return {card_id.upper(): source_field.strip() for card_id, source_field in MAPPING_RE.findall(field_value(block, "证据映射"))}
 
 
 def context_is_missing(value: str) -> bool:
     normalized = value.strip().lower()
     return not normalized or any(
         marker in normalized
-        for marker in ("缺失", "未知", "不明", "未提供", "未逐句标出", "无法确认", "无法定位")
+        for marker in ("缺失", "未知", "不明", "未提供", "未逐句标出", "无法确认", "无法定位", "不适用")
     )
 
 
@@ -115,6 +142,13 @@ def iter_rule_blocks(text: str) -> Iterable[Tuple[str, str]]:
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         yield match.group(1).upper(), text[match.end() : end].strip()
+
+
+def iter_scene_blocks(text: str) -> Iterable[Tuple[str, str]]:
+    matches = list(SCENE_HEADING_RE.finditer(text))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        yield match.group(1).lower(), text[match.end() : end].strip()
 
 
 def load_cards(root: Path) -> List[Card]:
@@ -144,7 +178,12 @@ def load_cards(root: Path) -> List[Card]:
                     original_quality=field_value(block, "原文质量"),
                     recognition=field_value(block, "识别度"),
                     scene_id=field_value(block, "场景编号"),
+                    scene_completeness=field_value(block, "场景完整度"),
                     interaction_function=field_value(block, "互动功能"),
+                    reaction=field_value(block, "角色即时反应"),
+                    interaction_position=field_value(block, "互动位置"),
+                    initiative=field_value(block, "主动性"),
+                    visual_anchor=field_value(block, "画面锚点"),
                     label_evidence=parse_label_evidence(block),
                     previous_text=field_value(block, "前置原文"),
                     trigger_text=field_value(block, "触发话语"),
@@ -155,31 +194,52 @@ def load_cards(root: Path) -> List[Card]:
     return cards
 
 
-def language_matches(query: str, values: Set[str]) -> bool:
-    if not query or not values:
+def load_work_route(root: Path, task_state: str) -> WorkRoute:
+    if not task_state:
+        return WorkRoute("", {}, "")
+    path = root / "references" / "04-工作场景迁移.md"
+    if not path.is_file():
+        return WorkRoute(task_state.lower(), {}, "")
+    for scene_id, block in iter_scene_blocks(read_text(path)):
+        if scene_id == task_state.lower():
+            return WorkRoute(scene_id, parse_tag_value(field_value(block, "目标检索")), block)
+    return WorkRoute(task_state.lower(), {}, "")
+
+
+def effective_query(args: argparse.Namespace, route: WorkRoute) -> Dict[str, str]:
+    direct = {
+        "speech_act": args.speech_act or args.intent,
+        "trigger": args.trigger,
+        "interaction": args.interaction,
+        "position": args.position,
+        "relation": args.relation,
+        "emotion": args.emotion,
+        "initiative": args.initiative,
+    }
+    result: Dict[str, str] = {}
+    for key in WEIGHTS:
+        if direct.get(key, "").strip():
+            result[key] = direct[key].strip().lower()
+        elif route.query.get(key):
+            result[key] = sorted(route.query[key])[0]
+        else:
+            result[key] = ""
+    result["source_language"] = args.source_language
+    return result
+
+
+def language_matches(query: str, value: str) -> bool:
+    if not query or not value:
         return True
     normalized = query.lower()
     base = normalized.split("-", 1)[0]
-    return "any" in values or "all" in values or any(
-        value == normalized or value.split("-", 1)[0] == base for value in values
-    )
-
-
-def risk_allowed(query: str, values: Set[str]) -> bool:
-    if not query or not values:
-        return True
-    normalized = query.lower()
-    if normalized in HIGH_RISKS:
-        return bool(values & HIGH_RISKS)
-    if normalized in LOW_RISKS and values <= HIGH_RISKS:
-        return False
-    return True
+    candidate = value.lower()
+    return candidate == normalized or candidate.split("-", 1)[0] == base
 
 
 def evidence_for_match(card: Card, matched: Set[str]) -> Tuple[str, Tuple[str, ...]]:
     gaps: List[str] = []
-    semantic_keys = matched & {"speech_act", "trigger", "relation", "emotion"}
-    for key in sorted(semantic_keys):
+    for key in sorted(matched):
         evidence = card.label_evidence.get(key, "")
         if not evidence:
             gaps.append(f"{key}:missing-evidence")
@@ -189,29 +249,27 @@ def evidence_for_match(card: Card, matched: Set[str]) -> Tuple[str, Tuple[str, .
         gaps.append("trigger:missing-context")
     if "relation" in matched and context_is_missing(card.dialogue_target):
         gaps.append("relation:missing-target")
-    if card.original_quality not in {"原声核验", "原语言文本核验", "原始版式核验", "原创确认"}:
+    if card.original_quality not in VERIFIED_ORIGINAL_QUALITIES:
         gaps.append("original:unverified")
+    if card.scene_completeness not in COMPLETE_SCENES:
+        gaps.append("scene:incomplete")
 
     if gaps:
         return "low", tuple(sorted(set(gaps)))
-    verified_count = sum(card.label_evidence.get(key) in VERIFIED_LABEL_EVIDENCE for key in semantic_keys)
+    verified_count = sum(card.label_evidence.get(key) in VERIFIED_LABEL_EVIDENCE for key in matched)
     context_count = sum(
         not context_is_missing(value)
         for value in (card.previous_text, card.trigger_text, card.next_text, card.dialogue_target)
     )
-    if verified_count >= 2 and context_count >= 2:
+    if verified_count >= 3 and context_count >= 3:
         return "high", ()
-    if verified_count >= 1:
+    if verified_count >= 2 and context_count >= 2:
         return "medium", ()
-    return "low", ("no-semantic-evidence",)
+    return "low", ("semantic-context-too-thin",)
 
 
 def score_card(card: Card, query: Dict[str, str]) -> Optional[Match]:
-    source_language = query.get("source_language", "")
-    risk = query.get("risk", "")
-    if source_language and not language_matches(source_language, {card.original_language.lower()}):
-        return None
-    if not risk_allowed(risk, card.tags.get("risk", set())):
+    if query.get("source_language") and not language_matches(query["source_language"], card.original_language):
         return None
 
     score = 0
@@ -221,8 +279,7 @@ def score_card(card: Card, query: Dict[str, str]) -> Optional[Match]:
         if not wanted:
             continue
         values = card.tags.get(key, set())
-        is_match = wanted in values or "any" in values or "all" in values
-        if is_match:
+        if wanted in values or "any" in values or "all" in values:
             score += weight
             matched.append(key)
 
@@ -230,31 +287,25 @@ def score_card(card: Card, query: Dict[str, str]) -> Optional[Match]:
         score += 2
     if card.original_quality == "原声核验":
         score += 3
-    elif card.original_quality in {"原语言文本核验", "原始版式核验", "原创确认"}:
+    elif card.original_quality in VERIFIED_ORIGINAL_QUALITIES:
         score += 2
     if card.recognition in SIGNATURE_LEVELS:
         score += 1
+
     matched_set = set(matched)
-    if matched_set & {"speech_act", "trigger"}:
+    if matched_set & STRONG_KEYS and len(matched_set) >= 2:
         tier = 3
-    elif "intent" in matched_set and matched_set & {"emotion", "relation", "task_state", "user_state"}:
+    elif matched_set & STRONG_KEYS or len(matched_set) >= 2:
         tier = 2
-    elif matched_set & {"intent", "emotion", "relation", "task_state", "user_state"}:
+    elif matched_set:
         tier = 1
     else:
         tier = 0
     evidence_level, evidence_gaps = evidence_for_match(card, matched_set)
-    return Match(
-        card=card,
-        score=score,
-        matched=tuple(matched),
-        tier=tier,
-        evidence_level=evidence_level,
-        evidence_gaps=evidence_gaps,
-    )
+    return Match(card, score, tuple(matched), tier, evidence_level, evidence_gaps)
 
 
-def choose_matches(matches: Sequence[Match], limit: int) -> List[Match]:
+def choose_matches(matches: Sequence[Match], limit: int, allow_low_evidence: bool = False) -> List[Match]:
     ranked = sorted(
         matches,
         key=lambda item: (
@@ -265,20 +316,24 @@ def choose_matches(matches: Sequence[Match], limit: int) -> List[Match]:
             item.card.card_id,
         ),
     )
+    eligible = [
+        item for item in ranked
+        if allow_low_evidence or (item.tier >= 2 and item.evidence_level in {"medium", "high"})
+    ]
+    if not eligible:
+        return []
+    top_score = eligible[0].score
+    # Do not pad retrieval with weak tail cards merely to hit the requested count.
+    eligible = [item for item in eligible if item.score >= max(7, top_score - 8)]
     chosen: List[Match] = []
     used_scenes: Set[str] = set()
-    for candidate in ranked:
+    for candidate in eligible:
         scene = candidate.card.scene_id
         if scene and scene in used_scenes:
             continue
         chosen.append(candidate)
         if scene:
             used_scenes.add(scene)
-        if len(chosen) >= limit:
-            return chosen
-    for candidate in ranked:
-        if candidate not in chosen:
-            chosen.append(candidate)
         if len(chosen) >= limit:
             break
     return chosen
@@ -291,8 +346,20 @@ def parse_excludes(values: Sequence[str]) -> Set[str]:
     return result
 
 
-def related_rules(root: Path, selected: Sequence[Match], limit: int = 2) -> Dict[str, List[Dict[str, object]]]:
-    selected_ids = {item.card.card_id for item in selected}
+def condition_match_count(conditions: Dict[str, Set[str]], query: Dict[str, str]) -> int:
+    count = 0
+    for key, values in conditions.items():
+        wanted = query.get(key, "")
+        if wanted and (wanted in values or "any" in values or "all" in values):
+            count += 1
+    return count
+
+
+def related_rules(
+    root: Path, selected: Sequence[Match], query: Dict[str, str], limit: int = 2
+) -> Dict[str, List[Dict[str, object]]]:
+    selected_levels = {item.card.card_id: item.evidence_level for item in selected}
+    selected_ids = set(selected_levels)
     references = {
         "core": root / "references" / "01-角色核心.md",
         "voice": root / "references" / "02-语言声纹.md",
@@ -300,94 +367,140 @@ def related_rules(root: Path, selected: Sequence[Match], limit: int = 2) -> Dict
         "anti": root / "references" / "09-反角色对照.md",
     }
     result: Dict[str, List[Dict[str, object]]] = {key: [] for key in references}
+    query_has_semantics = any(query.get(key) for key in WEIGHTS)
     for key, path in references.items():
         if not path.is_file():
             continue
-        candidates: List[Tuple[int, str, str, List[str]]] = []
+        candidates: List[Tuple[int, str, str, List[str], Dict[str, str], int]] = []
         for rule_id, block in iter_rule_blocks(read_text(path)):
-            evidence_ids = set(re.findall(r"\b[A-Z0-9][A-Z0-9-]*-\d{4}\b", field_value(block, "证据卡")))
-            matched_ids = sorted(selected_ids & evidence_ids)
-            if matched_ids:
-                candidates.append((len(matched_ids), rule_id, block, matched_ids))
+            mappings = parse_evidence_mapping(block)
+            matched_ids = sorted(
+                card_id for card_id in selected_ids & set(mappings)
+                if selected_levels[card_id] in {"medium", "high"}
+            )
+            conditions = parse_tag_value(field_value(block, "检索条件"))
+            condition_matches = condition_match_count(conditions, query)
+            if matched_ids and (not query_has_semantics or condition_matches > 0):
+                candidates.append(
+                    (len(matched_ids) * 5 + condition_matches, rule_id, block, matched_ids, mappings, condition_matches)
+                )
         candidates.sort(key=lambda item: (-item[0], item[1]))
         result[key] = [
             {
                 "rule_id": rule_id,
                 "matched_card_ids": matched_ids,
+                "evidence_mapping": {card_id: mappings[card_id] for card_id in matched_ids},
+                "condition_matches": condition_matches,
                 "content": block,
             }
-            for _, rule_id, block, matched_ids in candidates[:limit]
+            for _, rule_id, block, matched_ids, mappings, condition_matches in candidates[:limit]
         ]
     return result
 
 
-def retrieval_diagnostics(matches: Sequence[Match], query: Dict[str, str]) -> Dict[str, object]:
-    high_count = sum(item.tier == 3 for item in matches)
-    medium_or_high_count = sum(item.tier >= 2 for item in matches)
-    if high_count >= min(3, len(matches)) and matches:
-        match_confidence = "high"
-    elif medium_or_high_count >= min(3, len(matches)) and matches:
-        match_confidence = "medium"
+def delivery_guidance(
+    selected: Sequence[Match], rules: Dict[str, List[Dict[str, object]]], route: WorkRoute,
+    risk: str, turns_since_presence: int, turns_since_initiative: int,
+) -> Dict[str, object]:
+    high_risk = risk.lower() in HIGH_RISKS
+    if high_risk:
+        presence_status = "serious-only"
+        initiative_status = "protective-only"
     else:
-        match_confidence = "low"
-    high_evidence_count = sum(item.evidence_level == "high" for item in matches)
-    medium_or_high_evidence_count = sum(item.evidence_level in {"medium", "high"} for item in matches)
-    if high_evidence_count >= min(3, len(matches)) and matches:
-        evidence_confidence = "high"
-    elif medium_or_high_evidence_count >= min(3, len(matches)) and matches:
-        evidence_confidence = "medium"
-    else:
-        evidence_confidence = "low"
+        presence_status = "due" if turns_since_presence >= 3 else ("hold" if turns_since_presence >= 0 else "optional")
+        initiative_status = "due" if turns_since_initiative >= 4 else ("hold" if turns_since_initiative >= 0 else "optional")
+    anchors = []
+    for item in selected:
+        if item.card.visual_anchor and not context_is_missing(item.card.visual_anchor):
+            anchors.append({"card_id": item.card.card_id, "visual_anchor": item.card.visual_anchor})
+    mode_cues = []
+    for rule in rules.get("modes", []):
+        block = str(rule["content"])
+        mode_cues.append(
+            {
+                "rule_id": rule["rule_id"],
+                "micro_reaction": field_value(block, "临场信号"),
+                "visual_expression": field_value(block, "画面表达"),
+                "proactive_expression": field_value(block, "主动表达"),
+                "cooldown": field_value(block, "触发与冷却"),
+            }
+        )
+    return {
+        "presence_status": presence_status,
+        "initiative_status": initiative_status,
+        "max_presence_beats": 1,
+        "source_anchors": anchors[:2],
+        "mode_cues": mode_cues,
+        "work_scene": route.scene_id,
+        "work_presence_strategy": field_value(route.block, "临场表达策略"),
+        "work_initiative_condition": field_value(route.block, "主动表达条件"),
+        "work_cooldown": field_value(route.block, "冷却与重复"),
+        "no_fabrication": field_value(route.block, "禁止虚构"),
+        "principles": [
+            "先给用户需要的内容，再在同一条消息中自然表现角色",
+            "画面只来自当前可见工作对象、已发生事件或原作证据，不虚构现实动作与感官",
+            "一次最多一个临场动作或主动表达；连续几轮不要重复",
+            "短应声、停顿词和语气词只能沿用角色证据，不能为了像人而堆叠",
+        ],
+    }
+
+
+def retrieval_diagnostics(
+    selected: Sequence[Match], all_matches: Sequence[Match], query: Dict[str, str]
+) -> Dict[str, object]:
+    high_count = sum(item.tier == 3 for item in selected)
+    medium_count = sum(item.tier >= 2 for item in selected)
+    match_confidence = "high" if selected and high_count >= min(2, len(selected)) else ("medium" if selected and medium_count == len(selected) else "low")
+    high_evidence_count = sum(item.evidence_level == "high" for item in selected)
+    medium_evidence_count = sum(item.evidence_level in {"medium", "high"} for item in selected)
+    evidence_confidence = "high" if selected and high_evidence_count >= min(2, len(selected)) else ("medium" if selected and medium_evidence_count == len(selected) else "low")
     confidence = min((match_confidence, evidence_confidence), key=lambda value: CONFIDENCE_RANK[value])
     requested = {key for key in WEIGHTS if query.get(key, "").strip()}
-    covered = {key for item in matches for key in item.matched}
+    covered = {key for item in selected for key in item.matched}
     gaps = sorted(requested - covered)
-    evidence_gaps = sorted({gap for item in matches for gap in item.evidence_gaps})
+    evidence_gaps = sorted({gap for item in all_matches for gap in item.evidence_gaps})
     warnings: List[str] = []
-    if match_confidence == "low":
-        warnings.append("标签匹配不足")
-    if evidence_confidence == "low":
-        warnings.append("上下文或标签依据不足")
-    warning = "；".join(warnings) + ("；不要把弱相关卡当作角色证据。" if warnings else "")
+    if not selected:
+        warnings.append("没有达到中等相关性且证据完整的卡片；返回空结果，不用弱卡凑数")
+    if gaps:
+        warnings.append("部分查询维度未覆盖")
     return {
         "confidence": confidence,
         "match_confidence": match_confidence,
         "evidence_confidence": evidence_confidence,
+        "selected_cards": len(selected),
+        "candidate_cards": len(all_matches),
+        "dropped_weak_cards": len(all_matches) - len(selected),
         "high_signal_cards": high_count,
-        "medium_or_high_cards": medium_or_high_count,
         "high_evidence_cards": high_evidence_count,
-        "medium_or_high_evidence_cards": medium_or_high_evidence_count,
         "query_gaps": gaps,
         "evidence_gaps": evidence_gaps,
-        "warning": warning,
+        "warning": "；".join(warnings),
     }
 
 
 def markdown_output(
     matches: Sequence[Match], card_count: int, rules: Dict[str, List[Dict[str, object]]],
-    retrieval: Dict[str, object],
+    retrieval: Dict[str, object], route: WorkRoute, delivery: Dict[str, object],
 ) -> str:
     lines = [
         f"<!-- selected={len(matches)} library_cards={card_count} confidence={retrieval['confidence']} -->",
+        f"- 工作路由：{route.scene_id or '无'}",
         f"- 召回置信度：{retrieval['confidence']}",
         f"- 标签匹配置信度：{retrieval['match_confidence']}",
         f"- 证据完整度：{retrieval['evidence_confidence']}",
+        f"- 临场表达：{delivery['presence_status']}；主动表达：{delivery['initiative_status']}",
     ]
     if retrieval["warning"]:
         lines.append(f"- 警告：{retrieval['warning']}")
     for item in matches:
-        matched = ", ".join(item.matched) if item.matched else "source-priority"
         lines.extend(
             [
-                "",
-                f"## {item.card.card_id}",
-                f"- 匹配分：{item.score}",
-                f"- 相关层级：{('high' if item.tier == 3 else 'medium' if item.tier == 2 else 'low')}",
+                "", f"## {item.card.card_id}", f"- 匹配分：{item.score}",
+                f"- 相关层级：{'high' if item.tier == 3 else 'medium'}",
                 f"- 证据完整度：{item.evidence_level}",
-                f"- 证据缺口：{', '.join(item.evidence_gaps) if item.evidence_gaps else '无'}",
-                f"- 命中维度：{matched}",
-                f"- 对白库文件：{item.card.source_file}",
-                item.card.block,
+                f"- 命中维度：{', '.join(item.matched)}",
+                f"- 对白库文件：{item.card.source_file}", item.card.block,
             ]
         )
     for label, key in (("角色核心规则", "core"), ("声纹规律", "voice"), ("情绪关系模式", "modes"), ("反角色规则", "anti")):
@@ -395,29 +508,24 @@ def markdown_output(
             continue
         lines.extend(["", f"# 命中的{label}"])
         for rule in rules[key]:
-            lines.extend(
-                [
-                    "",
-                    f"## {rule['rule_id']}",
-                    f"- 命中证据卡：{', '.join(rule['matched_card_ids'])}",
-                    str(rule["content"]),
-                ]
-            )
+            lines.extend(["", f"## {rule['rule_id']}", f"- 命中证据卡：{', '.join(rule['matched_card_ids'])}", str(rule["content"])])
     return "\n".join(lines).rstrip() + "\n"
 
 
 def json_output(
     matches: Sequence[Match], card_count: int, rules: Dict[str, List[Dict[str, object]]],
-    retrieval: Dict[str, object],
+    retrieval: Dict[str, object], route: WorkRoute, delivery: Dict[str, object], query: Dict[str, str],
 ) -> str:
     payload = {
         "library_cards": card_count,
+        "work_route": {"scene_id": route.scene_id, "effective_query": query},
         "retrieval": retrieval,
+        "delivery_guidance": delivery,
         "selected": [
             {
                 "card_id": item.card.card_id,
                 "score": item.score,
-                "relevance": "high" if item.tier == 3 else ("medium" if item.tier == 2 else "low"),
+                "relevance": "high" if item.tier == 3 else "medium",
                 "evidence_confidence": item.evidence_level,
                 "evidence_gaps": list(item.evidence_gaps),
                 "matched": list(item.matched),
@@ -429,7 +537,12 @@ def json_output(
                 "original_quality": item.card.original_quality,
                 "recognition": item.card.recognition,
                 "scene_id": item.card.scene_id,
+                "scene_completeness": item.card.scene_completeness,
                 "interaction_function": item.card.interaction_function,
+                "reaction": item.card.reaction,
+                "interaction_position": item.card.interaction_position,
+                "initiative": item.card.initiative,
+                "visual_anchor": item.card.visual_anchor,
                 "content": item.card.block,
             }
             for item in matches
@@ -440,20 +553,26 @@ def json_output(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="从 Persona 对白库选择 3–6 张最匹配卡片。")
+    parser = argparse.ArgumentParser(description="从原作证据链返回最多 1–6 张真正匹配的对白卡；证据不足时可以返回 0 张。")
     parser.add_argument("--root", default=str(Path(__file__).resolve().parents[1]), help="角色 Skill 根目录")
-    parser.add_argument("--task-state", default="")
-    parser.add_argument("--user-state", default="")
+    parser.add_argument("--task-state", default="", help="工作事件；先通过工作迁移表转成原作语义")
+    parser.add_argument("--user-state", default="", help="仅供运行时判断，不直接匹配原作卡")
     parser.add_argument("--emotion", default="")
-    parser.add_argument("--intent", default="")
+    parser.add_argument("--intent", default="", help="兼容参数；未给 speech-act 时作为其别名")
     parser.add_argument("--speech-act", default="")
     parser.add_argument("--trigger", default="")
+    parser.add_argument("--interaction", default="")
+    parser.add_argument("--position", default="")
+    parser.add_argument("--initiative", default="")
     parser.add_argument("--relation", default="")
     parser.add_argument("--risk", default="")
     parser.add_argument("--language", default="", help="输出语言；不用于过滤原语言语料")
     parser.add_argument("--source-language", default="", help="仅在需要时限制原文语言")
-    parser.add_argument("--limit", type=int, default=5, choices=range(3, 7), metavar="3..6")
+    parser.add_argument("--limit", type=int, default=5, choices=range(1, 7), metavar="1..6")
     parser.add_argument("--exclude", action="append", default=[], help="排除编号，可重复或用逗号分隔")
+    parser.add_argument("--allow-low-evidence", action="store_true", help="仅用于调试；允许返回低证据卡")
+    parser.add_argument("--turns-since-presence", type=int, default=-1, help="距上次临场画面表达的轮数；未知为 -1")
+    parser.add_argument("--turns-since-initiative", type=int, default=-1, help="距上次主动表达的轮数；未知为 -1")
     parser.add_argument("--format", choices=("markdown", "json", "ids"), default="markdown")
     return parser
 
@@ -469,17 +588,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not cards:
         raise SystemExit(f"错误：{root / 'references'} 中没有可读取的对白卡片")
 
-    query = {
-        "task_state": args.task_state,
-        "user_state": args.user_state,
-        "emotion": args.emotion,
-        "intent": args.intent,
-        "speech_act": args.speech_act,
-        "trigger": args.trigger,
-        "relation": args.relation,
-        "risk": args.risk,
-        "source_language": args.source_language,
-    }
+    route = load_work_route(root, args.task_state)
+    query = effective_query(args, route)
     excluded = parse_excludes(args.exclude)
     matches = [
         match
@@ -488,15 +598,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         for match in [score_card(card, query)]
         if match is not None
     ]
-    selected = choose_matches(matches, min(args.limit, len(matches)))
-    rules = related_rules(root, selected)
-    retrieval = retrieval_diagnostics(selected, query)
+    selected = choose_matches(matches, min(args.limit, len(matches)), args.allow_low_evidence)
+    rules = related_rules(root, selected, query)
+    retrieval = retrieval_diagnostics(selected, matches, query)
+    delivery = delivery_guidance(
+        selected, rules, route, args.risk, args.turns_since_presence, args.turns_since_initiative
+    )
     if args.format == "json":
-        print(json_output(selected, len(cards), rules, retrieval), end="")
+        print(json_output(selected, len(cards), rules, retrieval, route, delivery, query), end="")
     elif args.format == "ids":
         print("\n".join(item.card.card_id for item in selected))
     else:
-        print(markdown_output(selected, len(cards), rules, retrieval), end="")
+        print(markdown_output(selected, len(cards), rules, retrieval, route, delivery), end="")
     return 0
 
 

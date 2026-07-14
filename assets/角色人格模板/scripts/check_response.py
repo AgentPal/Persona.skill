@@ -32,6 +32,15 @@ INTERNAL_PROCESS_PATTERNS = (
     r"(?:先|正在|接下来).{0,16}?(?:运行|调用).{0,20}?(?:select_dialogues|选择器|检查器|内部脚本|命令)",
     r"(?:先|正在|接下来).{0,12}?(?:分析|思考).{0,20}?(?:再|然后|之后).{0,12}?(?:回答|回复)",
 )
+HESITATION_PATTERNS = (r"(?<!\w)嗯+(?!\w)", r"(?<!\w)呃+(?!\w)", r"那个[，,。.…… ]", r"怎么说呢", r"哈哈+")
+STAGE_DIRECTION_PATTERNS = (
+    r"\*[^*\n]{1,30}\*", r"（(?:笑|叹气|歪头|眨眼|拍拍|递给|端来|坐到)[^）]{0,20}）",
+    r"\[(?:笑|叹气|歪头|眨眼|拍拍|递给|端来|坐到)[^\]]{0,20}\]",
+)
+FABRICATED_SENSORY_PATTERNS = (
+    r"我(?:正)?看(?:见|到)你", r"我听(?:见|到)你", r"我闻到", r"我坐到你(?:身边|旁边)",
+    r"我给你(?:端|递|拿)(?:来|了)", r"拍拍你的(?:肩|头)",
+)
 
 
 def read_text(path: Path) -> str:
@@ -106,6 +115,18 @@ def analyze(text: str, root: Path) -> dict[str, object]:
     if process_hits:
         add_finding(findings, "internal_process_preamble", 60, " / ".join(process_hits))
 
+    hesitation_hits = unique_pattern_hits(prose, HESITATION_PATTERNS)
+    if len(hesitation_hits) >= 4:
+        add_finding(findings, "performed_hesitation_density", 30, f"命中 {len(hesitation_hits)} 个犹豫或笑声填充")
+
+    stage_hits = unique_pattern_hits(text, STAGE_DIRECTION_PATTERNS)
+    if len(stage_hits) >= 2:
+        add_finding(findings, "stage_direction_density", 30, f"命中 {len(stage_hits)} 个舞台动作")
+
+    sensory_hits = unique_pattern_hits(prose, FABRICATED_SENSORY_PATTERNS)
+    if sensory_hits:
+        add_finding(findings, "unverified_sensory_claim", 45, " / ".join(sensory_hits))
+
     ai_hits = [item for item in AI_PHRASES if item in prose]
     if ai_hits:
         add_finding(findings, "ai_written_connectors", min(30, 12 * len(ai_hits)), " / ".join(ai_hits))
@@ -167,7 +188,7 @@ def analyze(text: str, root: Path) -> dict[str, object]:
         "oral_markers": oral_hits,
         "findings": findings,
         "anti_rule_hits": anti_hits,
-        "note": "分数只检测通用/书面腔风险；角色是否真实仍需原文证据和去名盲测。",
+        "note": "分数检测通用/书面腔与伪人类化风险；自然口语、临场画面和主动表达是否属于角色仍需原文证据、冷却记录和去名盲测。",
     }
 
 

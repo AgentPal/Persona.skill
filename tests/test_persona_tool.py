@@ -47,10 +47,14 @@ def card_text(
     recognition = "核心" if index <= signature_count else "补充"
     annotation_styles = ("追问", "转折", "邀请", "拒绝", "缓和", "确认", "自修正", "短促收束")
     annotation_style = annotation_styles[(index - 1) % len(annotation_styles)]
+    positions = ("发起", "接话", "追问", "打断", "跟进", "收束", "自言自语", "接话后转折")
+    initiatives = ("主动发起", "回应", "跟进", "打断", "收束", "自我修正", "回应后接手", "主动回访")
+    speech_act = intents[(index - 1) % 8]
+    emotion = emotions[(index - 1) % 8]
     return f"""## {card_id}
 
-- 检索标签：task_state={task_state}; user_state={user_states[(index - 1) % 4]}; emotion={emotions[(index - 1) % 8]}; intent={intents[(index - 1) % 8]}; relation=familiar; risk={risk}; language=zh-CN; speech_act={intents[(index - 1) % 8]}; trigger={task_state}
-- 标签依据：speech_act=原文可见; trigger=上下文可见; relation=上下文可见; emotion=原文可见
+- 原作检索标签：speech_act={speech_act}; trigger={task_state}; interaction={speech_act}; position=reply; relation=familiar; emotion={emotion}; initiative=response
+- 标签依据：speech_act=原文可见; trigger=上下文可见; interaction=上下文可见; position=上下文可见; relation=上下文可见; emotion=原文可见; initiative=上下文可见
 - 卡片类型：{card_type}
 - 原文：{'原作逐字原句' if existing else '原创规范原句'} {index}
 - 原文语言：zh-CN
@@ -61,6 +65,7 @@ def card_text(
 - 来源位置：{source_id}，测试定位 {index}
 - 作品定位：测试作品第 {scene_number} 场，位置 {index}
 - 场景编号：SCENE-{scene_number:04d}
+- 场景完整度：完整
 - 前置原文：{annotation_style}前一句测试原文 {index}
 - 触发话语：{annotation_style}触发话语 {index}
 - 后续原文：{annotation_style}后一句测试原文 {index}
@@ -68,10 +73,14 @@ def card_text(
 - 关系距离：familiar
 - 交流目的：{intents[(index - 1) % 8]}
 - 互动功能：{intents[(index - 1) % 8]}-{index}
+- 角色即时反应：{annotation_style}后立即回应当前触发 {index}
+- 互动位置：{positions[(index - 1) % len(positions)]}
+- 主动性：{initiatives[(index - 1) % len(initiatives)]}
 - 主要情绪：{emotions[(index - 1) % 8]}
 - 情绪强度：2
 - 情绪转折：{annotation_style}情绪变化 {index}
 - 非语言反应：{annotation_style}动作观察 {index}
+- 画面锚点：{annotation_style}物件与空间观察 {index}
 - 语音表现：{annotation_style}原声语速重音观察 {index}
 - 词汇标记：{annotation_style}词汇标记 {index}
 - 语法标记：{annotation_style}语法标记 {index}
@@ -147,7 +156,12 @@ def build_fixture(
 - 抽查数：6
 - 可追溯数：6
 - 召回相关数：5
+- 证据映射抽查数：12
+- 证据映射成立数：10
+- 评估者类型：independent-context
+- 评估者标识：隔离证据审计上下文 C
 - 追溯记录：六个测试场景的完整映射
+- 原始记录位置：tests/evidence-map-record-c
 - 验证状态：通过
 """,
         "CASE-21": """## CASE-21 | 身份与人物小传问答
@@ -200,6 +214,9 @@ def build_fixture(
     )
 
     evidence_count = max(card_count, 1)
+    task_states = ("start", "progress", "waiting", "failed", "risk", "complete", "blocked", "issue")
+    emotions = ("cheerful", "caring", "serious", "alert", "calm", "confident", "apologetic", "teasing")
+    intents = ("encourage", "report", "warn", "comfort", "explain", "apologize", "clarify", "celebrate")
     core_count = 12 if persona_type in {"existing-character", "real-person-simulation"} else 8
     core_layers = (
         "value", "judgment", "desire", "bias", "boundary", "behavior", "relationship",
@@ -233,6 +250,8 @@ def build_fixture(
 - 结论：{core_conclusions[index - 1]}
 - 可观察行为：{core_behaviors[index - 1]}
 - 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
+- 证据映射：TESTROLE-{first:04d}=>角色即时反应；TESTROLE-{second:04d}=>互动功能
+- 检索条件：speech_act={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}; trigger={task_states[(first - 1) % 8]}/{task_states[(second - 1) % 8]}; interaction={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}
 - 其他来源：SRC-0001
 - 反证或边界：核心边界 {index}
 - 适用条件：{core_conditions[index - 1]}
@@ -276,6 +295,8 @@ def build_fixture(
 - 层级：{voice_layers[index - 1]}
 - 规律：{voice_patterns[index - 1]}
 - 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
+- 证据映射：TESTROLE-{first:04d}=>口语现象；TESTROLE-{second:04d}=>句式与节奏
+- 检索条件：speech_act={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}; trigger={task_states[(first - 1) % 8]}/{task_states[(second - 1) % 8]}; interaction={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}
 - 反证或边界：{voice_boundaries[index - 1]}
 - 适用条件：{voice_conditions[index - 1]}
 - 置信度：高
@@ -299,9 +320,15 @@ def build_fixture(
 - 语言变化：{mode_emotions[(index - 1) % len(mode_emotions)]} 时调整句长和追问强度
 - 响应形态：采用 {mode_emotions[(index - 1) % len(mode_emotions)]} 对应的不同组织形态
 - 口语节奏：保留 {mode_emotions[(index - 1) % len(mode_emotions)]} 的断句与转折位置
+- 临场信号：先接住当前具体词再出现短反应 {index}
+- 画面表达：只借当前可见测试对象形成一个画面 {index}
+- 主动表达：间隔足够时主动回访一个已出现的顾虑 {index}
+- 触发与冷却：低风险且至少间隔三轮 {index}
 - 禁止结构：禁止固定骨架 {index}
 - 行动倾向：行动倾向 {index}
 - 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
+- 证据映射：TESTROLE-{first:04d}=>角色即时反应；TESTROLE-{second:04d}=>非语言反应
+- 检索条件：speech_act={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}; trigger={task_states[(first - 1) % 8]}/{task_states[(second - 1) % 8]}; interaction={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}
 - 反证或边界：模式边界 {index}
 """
         )
@@ -324,6 +351,8 @@ def build_fixture(
 - 为什么不像：{anti_reasons[index - 1]}
 - 角色替代结构：{anti_alternatives[index - 1]}
 - 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
+- 证据映射：TESTROLE-{first:04d}=>句式与节奏；TESTROLE-{second:04d}=>互动功能
+- 检索条件：speech_act={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}; trigger={task_states[(first - 1) % 8]}/{task_states[(second - 1) % 8]}; interaction={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}
 - 适用场景：测试场景 {index}
 - 例外：精确技术事实保留 {index}
 """
@@ -331,19 +360,35 @@ def build_fixture(
     write_text(target / "references" / "09-反角色对照.md", "# 测试角色反角色对照\n\n" + "\n".join(anti_entries))
 
     scene_entries = []
+    presence_strategies = (
+        "用当前报错行形成一个短画面", "用停住的进度条表现等待", "用并排方案形成选择画面", "用刚保存的文件表现收束",
+        "用变绿的测试表现松气", "用重复失败的同一点表现卡住", "用备份副本表现保护", "用待办减少表现推进",
+    )
+    initiative_conditions = (
+        "用户重复同一顾虑时主动回访", "等待超过一轮时提出可并行小事", "阶段完成时分享一个相关联想", "发现遗漏时主动补上",
+        "用户疲惫时接手一个明确小动作", "选择摇摆时复述真实偏好", "风险出现时主动阻止并给恢复路", "问题解决后回看最初目标",
+    )
     for index, scene_id in enumerate(sorted(persona_tool.REQUIRED_SCENES), start=1):
-        first = ((index - 1) * 2 % evidence_count) + 1
+        first = ((index - 1) % evidence_count) + 1
         second = (first % evidence_count) + 1
         voice_id = ((index - 1) % voice_count) + 1
+        first_intent = intents[(first - 1) % len(intents)]
+        first_trigger = task_states[(first - 1) % len(task_states)]
+        first_emotion = emotions[(first - 1) % len(emotions)]
         scene_entries.append(
             f"""## {scene_id} | 测试场景
 
 - 触发：{scene_id} 场景出现可观察事件
+- 目标检索：speech_act={first_intent}; trigger={first_trigger}; interaction={first_intent}; position=reply; relation=familiar; emotion={first_emotion}; initiative=response
 - 原作互动功能：使用 {scene_id} 对应的互动功能
 - 角色即时反应：先产生 {scene_id} 场景特有的反应
 - 候选原文卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
 - 候选声纹规律：VOICE-{voice_id:02d}
 - 事实嵌入方式：把事实放入 {scene_id} 场景的反应之后
+- 临场表达策略：{presence_strategies[(index - 1) % len(presence_strategies)]}
+- 主动表达条件：{initiative_conditions[(index - 1) % len(initiative_conditions)]}
+- 冷却与重复：至少间隔三轮并排除最近卡 {index}
+- 禁止虚构：不声称看见或听见未发生的现实动作 {index}
 - 禁止退化：避免 {scene_id} 场景退化成统一助手模板
 """
         )
@@ -543,19 +588,27 @@ class PersonaToolTests(unittest.TestCase):
                 "--user-state",
                 "tired",
                 "--emotion",
-                "caring",
+                "alert",
                 "--intent",
-                "encourage",
+                "comfort",
                 "--speech-act",
-                "encourage",
+                "comfort",
                 "--trigger",
                 "failed",
+                "--interaction",
+                "comfort",
+                "--position",
+                "reply",
                 "--risk",
                 "low",
                 "--language",
                 "zh-CN",
                 "--format",
                 "json",
+                "--turns-since-presence",
+                "3",
+                "--turns-since-initiative",
+                "4",
             ]
             first = json.loads(subprocess.check_output(command, text=True, encoding="utf-8"))
             self.assertEqual(first["library_cards"], 80)
@@ -575,6 +628,13 @@ class PersonaToolTests(unittest.TestCase):
             selected_ids = {item["card_id"] for item in first["selected"]}
             for group in first["related_rules"].values():
                 self.assertTrue(all(set(rule["matched_card_ids"]) <= selected_ids for rule in group))
+                self.assertTrue(all(rule["condition_matches"] > 0 for rule in group))
+                self.assertTrue(
+                    all(set(rule["evidence_mapping"]) == set(rule["matched_card_ids"]) for rule in group)
+                )
+            self.assertEqual(first["delivery_guidance"]["presence_status"], "due")
+            self.assertEqual(first["delivery_guidance"]["initiative_status"], "due")
+            self.assertEqual(first["delivery_guidance"]["max_presence_beats"], 1)
 
             excluded = first["selected"][0]["card_id"]
             second = json.loads(
@@ -589,6 +649,8 @@ class PersonaToolTests(unittest.TestCase):
                         str(selector),
                         "--root",
                         str(role),
+                        "--task-state",
+                        "risk",
                         "--risk",
                         "high",
                         "--language",
@@ -600,8 +662,10 @@ class PersonaToolTests(unittest.TestCase):
                     encoding="utf-8",
                 )
             )
-            self.assertGreaterEqual(len(high_risk["selected"]), 3)
-            self.assertTrue(all("risk=high" in item["content"] for item in high_risk["selected"]))
+            self.assertGreaterEqual(len(high_risk["selected"]), 1)
+            self.assertEqual(high_risk["work_route"]["scene_id"], "risk")
+            self.assertEqual(high_risk["delivery_guidance"]["presence_status"], "serious-only")
+            self.assertTrue(all(item["evidence_confidence"] in {"high", "medium"} for item in high_risk["selected"]))
 
     def test_existing_character_below_target_requires_expansion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -833,6 +897,52 @@ class PersonaToolTests(unittest.TestCase):
             self.assertFalse(result["valid"])
             self.assertIn("dialogue.label_evidence_conflict", codes)
 
+    def test_isolated_excerpts_do_not_inflate_scene_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "isolated-scenes"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            library = role / "references" / "06-对白库.md"
+            text = library.read_text(encoding="utf-8").replace("- 场景完整度：完整", "- 场景完整度：孤立摘录")
+            write_text(library, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertEqual(result["metrics"]["distinct_source_scenes"], 0)
+            self.assertEqual(result["metrics"]["context_complete_cards"], 0)
+            self.assertIn("dialogue.source_scenes_low", codes)
+            self.assertIn("core_rule.evidence_context_incomplete", codes)
+
+    def test_original_cards_reject_work_domain_tags(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "work-tags-in-source"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            library = role / "references" / "06-对白库.md"
+            text = library.read_text(encoding="utf-8")
+            text = text.replace(
+                "- 原作检索标签：speech_act=encourage;",
+                "- 原作检索标签：task_state=failed; risk=high; speech_act=encourage;",
+                1,
+            )
+            write_text(library, text)
+            result = persona_tool.validate_skill(role, "release")
+            self.assertIn("dialogue.work_tags_in_source_card", {issue["code"] for issue in result["issues"]})
+
+    def test_rule_evidence_mapping_must_cover_cards_and_real_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "bad-evidence-map"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            core = role / "references" / "01-角色核心.md"
+            text = core.read_text(encoding="utf-8")
+            text = text.replace(
+                "- 证据映射：TESTROLE-0001=>角色即时反应；TESTROLE-0002=>互动功能",
+                "- 证据映射：TESTROLE-0001=>不存在字段",
+                1,
+            )
+            write_text(core, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertIn("core_rule.evidence_mapping_mismatch", codes)
+            self.assertIn("core_rule.evidence_mapping_field_invalid", codes)
+
     def test_selector_downgrades_high_tag_match_with_weak_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "weak-evidence"
@@ -856,10 +966,12 @@ class PersonaToolTests(unittest.TestCase):
                         "--root", str(role),
                         "--task-state", "failed",
                         "--user-state", "tired",
-                        "--emotion", "caring",
-                        "--intent", "encourage",
-                        "--speech-act", "encourage",
+                        "--emotion", "alert",
+                        "--intent", "comfort",
+                        "--speech-act", "comfort",
                         "--trigger", "failed",
+                        "--interaction", "comfort",
+                        "--position", "reply",
                         "--risk", "low",
                         "--language", "zh-CN",
                         "--format", "json",
@@ -868,10 +980,12 @@ class PersonaToolTests(unittest.TestCase):
                     encoding="utf-8",
                 )
             )
-            self.assertIn(selected["retrieval"]["match_confidence"], {"high", "medium"})
+            self.assertEqual(selected["selected"], [])
+            self.assertEqual(selected["retrieval"]["match_confidence"], "low")
             self.assertEqual(selected["retrieval"]["evidence_confidence"], "low")
             self.assertEqual(selected["retrieval"]["confidence"], "low")
-            self.assertTrue(all(item["evidence_confidence"] == "low" for item in selected["selected"]))
+            self.assertGreater(selected["retrieval"]["dropped_weak_cards"], 0)
+            self.assertIn("不用弱卡凑数", selected["retrieval"]["warning"])
 
     def test_same_context_self_evaluation_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -916,7 +1030,7 @@ class PersonaToolTests(unittest.TestCase):
             )
             library = role / "references" / "06-对白库.md"
             text = library.read_text(encoding="utf-8")
-            text = text.replace("language=zh-CN", "language=ja-JP").replace("- 原文语言：zh-CN", "- 原文语言：ja-JP")
+            text = text.replace("- 原文语言：zh-CN", "- 原文语言：ja-JP")
             write_text(library, text)
             source_path = role / "references" / "08-来源索引.md"
             write_text(
@@ -931,6 +1045,11 @@ class PersonaToolTests(unittest.TestCase):
                         sys.executable,
                         str(role / "scripts" / "select_dialogues.py"),
                         "--root", str(role),
+                        "--speech-act", "comfort",
+                        "--trigger", "failed",
+                        "--interaction", "comfort",
+                        "--position", "reply",
+                        "--emotion", "alert",
                         "--source-language", "ja-JP",
                         "--language", "zh-CN",
                         "--limit", "5",
@@ -999,12 +1118,44 @@ class PersonaToolTests(unittest.TestCase):
                     encoding="utf-8",
                 )
             )
+            fake_presence = json.loads(
+                subprocess.check_output(
+                    [
+                        sys.executable,
+                        str(checker),
+                        "--root", str(role),
+                        "--text", "*歪头* 嗯，呃，那个……哈哈，我看见你叹气了。*拍拍你的肩*",
+                    ],
+                    text=True,
+                    encoding="utf-8",
+                )
+            )
             self.assertEqual(generic["status"], "fail")
             self.assertGreaterEqual(generic["ai_tone_score"], 60)
             self.assertEqual(spoken["status"], "pass")
             self.assertLess(spoken["ai_tone_score"], 40)
             self.assertEqual(process_preamble["status"], "fail")
             self.assertIn("internal_process_preamble", {item["code"] for item in process_preamble["findings"]})
+            fake_codes = {item["code"] for item in fake_presence["findings"]}
+            self.assertEqual(fake_presence["status"], "fail")
+            self.assertIn("unverified_sensory_claim", fake_codes)
+            self.assertIn("stage_direction_density", fake_codes)
+
+    def test_evidence_mapping_audit_is_independent_and_meets_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "weak-map-audit"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            cases = role / "references" / "07-验证用例.md"
+            text = cases.read_text(encoding="utf-8")
+            text = text.replace("- 证据映射抽查数：12", "- 证据映射抽查数：6", 1)
+            text = text.replace("- 证据映射成立数：10", "- 证据映射成立数：3", 1)
+            text = text.replace("- 评估者标识：隔离证据审计上下文 C", "- 评估者标识：生成者本人自评", 1)
+            write_text(cases, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertIn("tests.evidence_mapping_samples_low", codes)
+            self.assertIn("tests.evidence_mapping_rate_low", codes)
+            self.assertIn("tests.self_evaluation_forbidden", codes)
 
     def test_original_persona_can_release_with_twenty_cards(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1027,6 +1178,10 @@ class PersonaToolTests(unittest.TestCase):
         self.assertIn("原语言逐字原文", creator)
         self.assertIn("声纹不能由模型自由概括", creator)
         self.assertIn("人物背景档案", creator)
+        self.assertIn("原文卡只标原作语义", creator)
+        self.assertIn("证据映射", creator)
+        self.assertIn("没有可靠卡就返回空结果", creator)
+        self.assertIn("临场感和主动表达必须稀疏", creator)
         runtime = (ROOT / "assets" / "角色人格模板" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("10-人物背景档案.md", runtime)
         self.assertIn("用户询问角色个人事实", runtime)
