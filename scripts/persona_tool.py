@@ -308,8 +308,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"错误：创建失败：{exc}", file=sys.stderr)
         return 1
 
-    print(f"已创建角色人格 Skill 工作目录：{target}")
-    print("下一步：填写全部 [待填写] 内容，完成并扩大调研直到达标或已穷尽，然后运行 release 校验。")
+    print(f"PERSONA_WORKDIR={target}")
+    print("PERSONA_BUILD_STATE=INCOMPLETE")
+    print("TERMINAL_ALLOWED=false")
+    print("USER_REPORT_ALLOWED=false")
+    print("NEXT_ACTION=立即继续调研并填写全部占位内容；随后反复修复 release 校验，启用后运行 completion-gate。")
+    print("禁止在初始化后结束当前任务、等待用户说继续，或把此目录当作已创建的人格 Skill 交付。")
     return 0
 
 
@@ -2687,6 +2691,37 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0 if result["valid"] else 1
 
 
+def cmd_completion_gate(args: argparse.Namespace) -> int:
+    """Provide a deterministic final-answer gate for persona creation tasks."""
+    root = Path(args.path).expanduser().resolve()
+    result = validate_skill(root, "release")
+    if not result["valid"]:
+        error_codes = []
+        for issue in result["issues"]:
+            if issue["severity"] == "error" and issue["code"] not in error_codes:
+                error_codes.append(issue["code"])
+        print("PERSONA_BUILD_STATE=INCOMPLETE")
+        print("TERMINAL_ALLOWED=false")
+        print("USER_REPORT_ALLOWED=false")
+        print(f"RELEASE_ERROR_COUNT={result['error_count']}")
+        print("ERROR_CODES=" + ",".join(error_codes[:20]))
+        print("NEXT_ACTION=按错误代码继续修复；数量或来源不足则扩大调研，然后重新运行 completion-gate。")
+        return 1
+    if args.activation_status == "pending":
+        print("PERSONA_BUILD_STATE=VALIDATED_NOT_ENABLED")
+        print("TERMINAL_ALLOWED=false")
+        print("USER_REPORT_ALLOWED=false")
+        print("NEXT_ACTION=按用户要求启用当前会话或持久作用域；完成后以 enabled 重新运行 completion-gate。")
+        return 1
+
+    print("PERSONA_BUILD_STATE=COMPLETE")
+    print("TERMINAL_ALLOWED=true")
+    print("USER_REPORT_ALLOWED=true")
+    print(f"ACTIVATION_STATUS={args.activation_status}")
+    print(f"PERSONA_PATH={root}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="创建并静态校验 Persona.skill 生成的角色人格 Skill。"
@@ -2706,6 +2741,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser.add_argument("--json", action="store_true", help="输出 JSON 结果")
     validate_parser.set_defaults(func=cmd_validate)
+
+    gate_parser = subparsers.add_parser(
+        "completion-gate", help="创建任务最终回复前的确定性完成门禁"
+    )
+    gate_parser.add_argument("path", help="角色人格 Skill 目录")
+    gate_parser.add_argument(
+        "--activation-status",
+        choices=("pending", "enabled", "not-requested"),
+        default="pending",
+        help="enabled 表示已启用；not-requested 仅用于用户明确要求只创建不启用",
+    )
+    gate_parser.set_defaults(func=cmd_completion_gate)
     return parser
 
 

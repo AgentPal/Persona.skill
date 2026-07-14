@@ -683,10 +683,64 @@ class PersonaToolTests(unittest.TestCase):
                 encoding="utf-8",
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("PERSONA_BUILD_STATE=INCOMPLETE", completed.stdout)
+            self.assertIn("TERMINAL_ALLOWED=false", completed.stdout)
+            self.assertIn("USER_REPORT_ALLOWED=false", completed.stdout)
+            self.assertIn("NEXT_ACTION=立即继续调研", completed.stdout)
+            self.assertNotIn("已创建角色人格 Skill", completed.stdout)
             self.assertTrue((role / "scripts" / "select_dialogues.py").is_file())
             self.assertTrue((role / "references" / "10-人物背景档案.md").is_file())
             draft = persona_tool.validate_skill(role, "draft")
             self.assertTrue(draft["valid"], draft["issues"])
+
+    def test_completion_gate_blocks_partial_and_unenabled_builds(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            partial = root / "partial-role"
+            init_result = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts" / "persona_tool.py"), "init",
+                    "--name", "未完成角色", "--slug", "partial-role", "--output", str(partial),
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(init_result.returncode, 0, init_result.stderr)
+            blocked = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts" / "persona_tool.py"),
+                    "completion-gate", str(partial), "--activation-status", "enabled",
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertNotEqual(blocked.returncode, 0)
+            self.assertIn("PERSONA_BUILD_STATE=INCOMPLETE", blocked.stdout)
+            self.assertIn("TERMINAL_ALLOWED=false", blocked.stdout)
+            self.assertIn("USER_REPORT_ALLOWED=false", blocked.stdout)
+
+            complete = root / "complete-role"
+            build_fixture(complete, "existing-character", 80, 40, 20)
+            pending = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts" / "persona_tool.py"),
+                    "completion-gate", str(complete),
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertNotEqual(pending.returncode, 0)
+            self.assertIn("PERSONA_BUILD_STATE=VALIDATED_NOT_ENABLED", pending.stdout)
+            self.assertIn("TERMINAL_ALLOWED=false", pending.stdout)
+
+            allowed = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts" / "persona_tool.py"),
+                    "completion-gate", str(complete), "--activation-status", "enabled",
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+            self.assertIn("PERSONA_BUILD_STATE=COMPLETE", allowed.stdout)
+            self.assertIn("TERMINAL_ALLOWED=true", allowed.stdout)
+            self.assertIn("USER_REPORT_ALLOWED=true", allowed.stdout)
 
     def test_existing_character_release_and_selector(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1598,6 +1652,18 @@ class PersonaToolTests(unittest.TestCase):
         self.assertIn("普通问候、闲聊和可立即回答的问题只发送最终回答", creator)
         self.assertIn("默认静默完成角色核心读取", creator)
         self.assertIn("最终版本始终为正式版", creator)
+        self.assertIn("创建任务持续执行锁", creator)
+        self.assertIn("禁止结束；立即继续下一项调研", creator)
+        self.assertIn("进度消息不是交付，也不是暂停许可", creator)
+        self.assertIn("不得把脚手架初始化", creator)
+        self.assertIn("不能等待用户说“继续”", creator)
+        self.assertIn("completion-gate", creator)
+        self.assertIn("只有它输出 `TERMINAL_ALLOWED=true`", creator)
+        workflow = (ROOT / "references" / "05-生成与验证规范.md").read_text(encoding="utf-8")
+        self.assertIn("RESEARCH -> GENERATE -> VALIDATE -> FIX -> TEST -> ENABLE -> COMPLETE", workflow)
+        self.assertIn("不得要求用户再次发送“继续”", workflow)
+        openai_yaml = (ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
+        self.assertIn("不要停在初始化或进度汇报", openai_yaml)
         self.assertIn("不按版权类别、文本长度或资料完整度限制收集", creator)
         self.assertIn("表达库禁止加入人物介绍", creator)
         self.assertIn("本人或角色真实产生的逐字表达", creator)
