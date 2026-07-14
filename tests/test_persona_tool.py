@@ -691,10 +691,24 @@ class PersonaToolTests(unittest.TestCase):
                     encoding="utf-8",
                 )
             )
+            process_preamble = json.loads(
+                subprocess.check_output(
+                    [
+                        sys.executable,
+                        str(checker),
+                        "--root", str(role),
+                        "--text", "千束：我先按轻松问候场景取几张日语原文卡。",
+                    ],
+                    text=True,
+                    encoding="utf-8",
+                )
+            )
             self.assertEqual(generic["status"], "fail")
             self.assertGreaterEqual(generic["ai_tone_score"], 60)
             self.assertEqual(spoken["status"], "pass")
             self.assertLess(spoken["ai_tone_score"], 40)
+            self.assertEqual(process_preamble["status"], "fail")
+            self.assertIn("internal_process_preamble", {item["code"] for item in process_preamble["findings"]})
 
     def test_original_persona_can_release_with_twenty_cards(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -709,6 +723,8 @@ class PersonaToolTests(unittest.TestCase):
         self.assertIn("用户直接回复一个非空名称时，视为选择 `2`", creator)
         self.assertIn("已经取得自定义名称后不得重复询问", creator)
         self.assertIn("创建过程中的所有 Agent 自然语言消息都必须以 `<角色名>：` 开头", creator)
+        self.assertIn("普通问候、闲聊和可立即回答的问题只发送最终回答", creator)
+        self.assertIn("默认静默完成角色核心读取", creator)
         self.assertIn("最终版本始终为正式版", creator)
         self.assertIn("不按版权类别、文本长度或资料完整度限制收集", creator)
         self.assertIn("对白库禁止加入官方角色介绍", creator)

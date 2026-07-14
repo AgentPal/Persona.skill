@@ -27,6 +27,11 @@ CHOICE_PATTERNS = (
     r"要不要继续.*?你", r"你来选", r"交给你选择",
 )
 ORAL_MARKERS = ("……", "…", "！", "？", "?!", "!?", "等等", "不对", "我是说", "嗯", "诶", "哎")
+INTERNAL_PROCESS_PATTERNS = (
+    r"(?:我|这边)?先.{0,24}?(?:读取|加载|检索|选择|抽取|取出?|找).{0,20}?(?:原文卡|对白卡|场景卡|角色核心|声纹规则)",
+    r"(?:先|正在|接下来).{0,16}?(?:运行|调用).{0,20}?(?:select_dialogues|选择器|检查器|内部脚本|命令)",
+    r"(?:先|正在|接下来).{0,12}?(?:分析|思考).{0,20}?(?:再|然后|之后).{0,12}?(?:回答|回复)",
+)
 
 
 def read_text(path: Path) -> str:
@@ -96,6 +101,10 @@ def analyze(text: str, root: Path) -> dict[str, object]:
     opening = next((item for item in GENERIC_OPENINGS if prose.startswith(item)), "")
     if opening:
         add_finding(findings, "generic_opening", 15, opening)
+
+    process_hits = unique_pattern_hits(prose, INTERNAL_PROCESS_PATTERNS)
+    if process_hits:
+        add_finding(findings, "internal_process_preamble", 60, " / ".join(process_hits))
 
     ai_hits = [item for item in AI_PHRASES if item in prose]
     if ai_hits:
