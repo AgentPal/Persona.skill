@@ -182,9 +182,9 @@ REQUIRED_BIO_BASELINE_FIELDS = (
 )
 
 # Existing people and characters differ greatly in how much source material is
-# reasonably available.  The declared research profile controls the release
-# target, while saturation fields prevent a creator from stopping at the first
-# convenient round.  "稀缺" is an exhaustion path, never a successful target.
+# reasonably available.  "丰富" is the only normal successful target for an
+# existing character or real person.  Lower profiles describe work in progress
+# and may release only through a genuinely exhausted, multi-scope search path.
 RESEARCH_PROFILES = {
     "丰富": {
         "cards": 80, "unique": 60, "evidence_units": 24, "signature": 12,
@@ -204,8 +204,13 @@ REQUIRED_RESEARCH_AUDIT_FIELDS = (
     "排除原因摘要", "覆盖维度", "最近两轮新增率", "饱和结论",
 )
 REQUIRED_RESEARCH_ROUND_FIELDS = (
-    "查询词、站点、资料类型与语言", "本轮候选数", "本轮正式收录数", "本轮待核验数",
+    "查询词、站点、资料类型与语言", "本轮新增检索范围", "本轮候选数", "本轮正式收录数", "本轮待核验数",
     "本轮排除数", "本轮新增率", "新增来源与卡片", "未覆盖指标",
+)
+MIN_EXHAUSTION_ROUNDS = 4
+NON_EXPANSION_SCOPE_RE = re.compile(
+    r"^(?:无|没有|未扩大|同上|相同|重复|仅复查|继续复查|既有范围|原范围|不适用|none|n/a)[。.!！]?$",
+    re.IGNORECASE,
 )
 LOCATOR_ONLY_CONTEXT_MARKERS = (
     "以话数与场景标题定位", "资料说明可定位", "由同一官方场景条目定位",
@@ -332,7 +337,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     print("FINAL_REPORT_ALLOWED=false")
     print("STATUS_REPLY_ALLOWED=true")
     print("LOOP_STAGE=RESEARCH")
-    print("NEXT_ACTION=立即继续调研并填写全部占位内容；随后反复修复 release 校验，启用后运行 completion-gate。")
+    print("NEXT_ACTION=立即继续调研并只填写人物身份基线、来源索引与原始表达卡；每批运行 research-gate。闸门通过前禁止批量生成规则、工作迁移和测试。")
+    print(f"STAGE_GATE_COMMAND=python scripts/persona_tool.py research-gate \"{target}\"")
     print("禁止在初始化后结束当前任务、等待用户说继续，或把此目录当作已创建的人格 Skill 交付。")
     return 0
 
@@ -594,6 +600,20 @@ def normalize_template_text(value: str) -> str:
     return re.sub(r"[\W_]+", "", text, flags=re.UNICODE)
 
 
+def normalize_research_scope(value: str | None) -> str:
+    """Normalize a research scope for repeated-round detection."""
+    if not value:
+        return ""
+    return re.sub(r"[\W_]+", "", value, flags=re.UNICODE).casefold()
+
+
+def is_substantive_research_expansion(value: str | None) -> bool:
+    """A later round must name a new source family, language, version or query scope."""
+    if not has_substantive_value(value):
+        return False
+    return not bool(NON_EXPANSION_SCOPE_RE.fullmatch((value or "").strip()))
+
+
 def context_is_missing(value: str | None) -> bool:
     if not value:
         return True
@@ -805,6 +825,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         "coverage_path": "unknown",
         "research_expansion_recorded": False,
         "research_rounds": 0,
+        "research_expansion_rounds": 0,
         "cards": 0,
         "exact_original_cards": 0,
         "performance_verified_cards": 0,
@@ -969,6 +990,22 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         and len(percentage_values(block, "本轮新增率")) == 1
         for _, block in research_blocks
     )
+    research_scope_values = [field_value(block, "本轮新增检索范围") for _, block in research_blocks]
+    substantive_expansion_scopes = [
+        value for index, value in enumerate(research_scope_values)
+        if index == 0 or is_substantive_research_expansion(value)
+    ]
+    normalized_expansion_scopes = [
+        normalize_research_scope(value) for value in substantive_expansion_scopes if value
+    ]
+    repeated_expansion_scopes = sorted(
+        scope for scope, count in Counter(normalized_expansion_scopes).items() if scope and count > 1
+    )
+    later_rounds_without_expansion = [
+        research_blocks[index][0]
+        for index, value in enumerate(research_scope_values)
+        if index > 0 and not is_substantive_research_expansion(value)
+    ]
     expansion_record = field_value(sources_text, "扩大范围记录")
     research_audit_values = {
         field: field_value(sources_text, field) for field in REQUIRED_RESEARCH_AUDIT_FIELDS
@@ -998,8 +1035,10 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     exhaustion_complete = (
         research_status == "已穷尽"
         and expansion_recorded
-        and research_rounds >= 2
+        and research_rounds >= MIN_EXHAUSTION_ROUNDS
         and research_rounds_complete
+        and not later_rounds_without_expansion
+        and not repeated_expansion_scopes
         and research_audit_complete
         and all(has_substantive_value(value) for value in research_fields.values())
     )
@@ -1016,8 +1055,8 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         missing = [name for name, value in research_fields.items() if not has_substantive_value(value)]
         if not expansion_recorded:
             missing.insert(0, "扩大范围记录")
-        if research_rounds < 2:
-            missing.insert(0, "至少两个 RESEARCH 调研轮次")
+        if research_rounds < MIN_EXHAUSTION_ROUNDS:
+            missing.insert(0, f"至少 {MIN_EXHAUSTION_ROUNDS} 个实质扩展的 RESEARCH 调研轮次")
         elif not research_rounds_complete:
             missing.insert(0, "RESEARCH 调研轮次的查询、结果或缺口字段")
         add_issue(
@@ -1053,10 +1092,10 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 issues, "error", "research.audit_incomplete",
                 "调研审计缺少：" + ", ".join(missing), sources_path, root,
             )
-        if research_status == "达标" and research_profile == "稀缺":
+        if research_status == "达标" and research_profile != "丰富":
             add_issue(
-                issues, "error", "research.sparse_cannot_pass",
-                "“稀缺”只表示扩大检索后仍不足，必须使用“已穷尽”路径，不能标为达标",
+                issues, "error", "research.non_rich_cannot_pass",
+                "现有角色或现实人物只有“丰富”档可以标为达标；“一般”或“稀缺”必须继续扩大范围，确实无资料后走“已穷尽”路径",
                 sources_path, root,
             )
         downgrade_text = " ".join(
@@ -1104,7 +1143,20 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         if research_blocks and not research_rounds_complete:
             add_issue(
                 issues, "error", "research.round_audit_incomplete",
-                "每个 RESEARCH 轮次都必须记录查询范围、本轮候选/正式/待核验/排除数量、本轮新增率、新增内容和未覆盖指标",
+                "每个 RESEARCH 轮次都必须记录查询范围、新增检索范围、本轮候选/正式/待核验/排除数量、本轮新增率、新增内容和未覆盖指标",
+                sources_path, root,
+            )
+        if later_rounds_without_expansion:
+            add_issue(
+                issues, "error", "research.round_no_expansion",
+                "后续调研轮次必须明确新增来源类别、站点域、语言、版本、别名或场景范围；以下轮次只是复查或未扩大："
+                + ", ".join(later_rounds_without_expansion),
+                sources_path, root,
+            )
+        if repeated_expansion_scopes:
+            add_issue(
+                issues, "error", "research.round_scope_repeated",
+                "不同调研轮次重复声明相同的新增检索范围；重复复查不能算新的扩展轮次",
                 sources_path, root,
             )
         round_rates = [
@@ -1137,6 +1189,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     metrics["research_rejected"] = rejected_material_count or 0
     metrics["research_expansion_recorded"] = expansion_recorded
     metrics["research_rounds"] = research_rounds
+    metrics["research_expansion_rounds"] = len(normalized_expansion_scopes)
 
     if skill_prefix and core_prefix and skill_prefix != core_prefix:
         add_issue(
@@ -3162,7 +3215,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     if persona_type == "existing-character":
         targets = profile_targets or RESEARCH_PROFILES["一般"]
         target_met = (
-            research_profile != "稀缺"
+            research_profile == "丰富"
             and research_status == "达标"
             and saturation_complete
             and len(all_ids) >= int(targets["cards"])
@@ -3194,7 +3247,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     elif persona_type == "real-person-simulation":
         targets = profile_targets or RESEARCH_PROFILES["一般"]
         target_met = (
-            research_profile != "稀缺"
+            research_profile == "丰富"
             and research_status == "达标"
             and saturation_complete
             and len(all_ids) >= int(targets["cards"])
@@ -3412,14 +3465,89 @@ def classify_loop_stage(error_codes: list[str]) -> tuple[str, str]:
     return "FIX", "按错误代码修复当前生成物，然后重新运行 iteration-gate。"
 
 
+LOOP_STAGE_PREFIXES = {
+    "RESEARCH": ("research.", "sources.", "dialogue."),
+    "REDISTILL": ("core_rule.", "voice.", "micro.", "mode.", "anti.", "scene."),
+    "TEST": ("tests.",),
+    "GENERATE": ("persona.", "content.", "biography.", "openai.", "skill."),
+}
+RESEARCH_IDENTITY_CODES = {
+    "persona.type_invalid", "persona.medium_invalid", "persona.original_language_missing",
+}
+
+
+def unique_error_codes(result: dict[str, object], prefixes: tuple[str, ...] | None = None) -> list[str]:
+    codes: list[str] = []
+    for issue in result["issues"]:
+        code = str(issue["code"])
+        if issue["severity"] != "error":
+            continue
+        if prefixes is not None and not code.startswith(prefixes):
+            continue
+        if code not in codes:
+            codes.append(code)
+    return codes
+
+
+def cmd_research_gate(args: argparse.Namespace) -> int:
+    """Gate only the source corpus before any rule distillation or testing."""
+    root = Path(args.path).expanduser().resolve()
+    result = validate_skill(root, "release")
+    metrics = result["metrics"]
+    research_codes = unique_error_codes(result, LOOP_STAGE_PREFIXES["RESEARCH"])
+    for code in unique_error_codes(result):
+        if code in RESEARCH_IDENTITY_CODES and code not in research_codes:
+            research_codes.append(code)
+
+    rich_targets = RESEARCH_PROFILES["丰富"]
+    if research_codes:
+        print("PERSONA_RESEARCH_STATE=INCOMPLETE")
+        print("RESEARCH_READY=false")
+        print("MUST_CONTINUE=true")
+        print("TERMINAL_ALLOWED=false")
+        print("USER_REPORT_ALLOWED=false")
+        print("LOOP_STAGE=RESEARCH")
+        print(f"ACTIVE_STAGE_ERROR_COUNT={len(research_codes)}")
+        print("ERROR_CODES=" + ",".join(research_codes[:20]))
+        print(f"RESEARCH_PROFILE={metrics['research_profile']}")
+        print(f"RESEARCH_STATUS={metrics['research_status']}")
+        print(f"CURRENT_CARDS={metrics['cards']}")
+        print(f"REQUIRED_CARDS={rich_targets['cards']}")
+        print(f"CURRENT_UNIQUE_EXPRESSIONS={metrics['unique_original_expressions']}")
+        print(f"REQUIRED_UNIQUE_EXPRESSIONS={rich_targets['unique']}")
+        print(f"CURRENT_EVIDENCE_UNITS={metrics['distinct_evidence_units']}")
+        print(f"REQUIRED_EVIDENCE_UNITS={rich_targets['evidence_units']}")
+        print(f"CURRENT_CONTEXT_COMPLETE_CARDS={metrics['context_complete_cards']}")
+        print(f"CURRENT_SIGNATURE_CARDS={metrics['signature_cards']}")
+        print(f"RESEARCH_ROUNDS={metrics['research_rounds']}")
+        print(f"EXPANSION_ROUNDS={metrics['research_expansion_rounds']}")
+        print("NEXT_ACTION=继续调研原始表达与完整语境；每轮必须扩大新的来源类别、站点、语言、版本、别名或场景范围。达到丰富档，或四轮实质扩展后有证据地标记已穷尽，再重跑 research-gate；此时禁止生成规则和测试。")
+        print(f"RETRY_COMMAND=python scripts/persona_tool.py research-gate \"{root}\"")
+        return 1
+
+    print("PERSONA_RESEARCH_STATE=READY")
+    print("RESEARCH_READY=true")
+    print("MUST_CONTINUE=true")
+    print("TERMINAL_ALLOWED=false")
+    print("USER_REPORT_ALLOWED=false")
+    print("LOOP_STAGE=REDISTILL")
+    print(f"RESEARCH_PROFILE={metrics['research_profile']}")
+    research_path = "exhausted" if metrics["research_status"] == "已穷尽" else "target-met"
+    print(f"RESEARCH_PATH={research_path}")
+    print(f"CURRENT_CARDS={metrics['cards']}")
+    print(f"CURRENT_EVIDENCE_UNITS={metrics['distinct_evidence_units']}")
+    print("NEXT_ACTION=资料闸门已通过；现在才从原文证据与真实语境蒸馏角色核心、声纹、微互动、情绪模式、反角色规则和工作迁移，然后运行 iteration-gate。")
+    return 0
+
+
 def emit_gate(root: Path, activation_status: str, command_name: str) -> int:
     result = validate_skill(root, "release")
     if not result["valid"]:
-        error_codes = []
-        for issue in result["issues"]:
-            if issue["severity"] == "error" and issue["code"] not in error_codes:
-                error_codes.append(issue["code"])
+        error_codes = unique_error_codes(result)
         stage, action = classify_loop_stage(error_codes)
+        stage_prefixes = LOOP_STAGE_PREFIXES.get(stage)
+        stage_codes = unique_error_codes(result, stage_prefixes) if stage_prefixes else error_codes
+        deferred_codes = [code for code in error_codes if code not in stage_codes]
         print("PERSONA_BUILD_STATE=INCOMPLETE")
         print("MUST_CONTINUE=true")
         print("TERMINAL_ALLOWED=false")
@@ -3427,9 +3555,12 @@ def emit_gate(root: Path, activation_status: str, command_name: str) -> int:
         print("FINAL_REPORT_ALLOWED=false")
         print("STATUS_REPLY_ALLOWED=true")
         print(f"LOOP_STAGE={stage}")
-        print(f"RELEASE_ERROR_COUNT={result['error_count']}")
-        print("ERROR_CODES=" + ",".join(error_codes[:20]))
+        print(f"ACTIVE_STAGE_ERROR_COUNT={len(stage_codes)}")
+        print(f"DEFERRED_ERROR_COUNT={len(deferred_codes)}")
+        print("ERROR_CODES=" + ",".join(stage_codes[:20]))
         print(f"NEXT_ACTION={action}")
+        if stage == "RESEARCH":
+            print(f"STAGE_GATE_COMMAND=python scripts/persona_tool.py research-gate \"{root}\"")
         print(f"RETRY_COMMAND=python scripts/persona_tool.py {command_name} \"{root}\" --activation-status {activation_status}")
         return 1
     if activation_status == "pending":
@@ -3486,6 +3617,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser.add_argument("--json", action="store_true", help="输出 JSON 结果")
     validate_parser.set_defaults(func=cmd_validate)
+
+    research_parser = subparsers.add_parser(
+        "research-gate", help="在蒸馏规则前单独校验原始资料、来源、语境和真实扩展轮次"
+    )
+    research_parser.add_argument("path", help="角色人格 Skill 目录")
+    research_parser.set_defaults(func=cmd_research_gate)
 
     iteration_parser = subparsers.add_parser(
         "iteration-gate", help="返回当前创建循环必须继续执行的阶段和下一动作"

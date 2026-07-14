@@ -749,6 +749,7 @@ def build_fixture(
 ### RESEARCH-01 | 初始范围
 
 - 查询词、站点、资料类型与语言：角色名、官方页、中文和日文
+- 本轮新增检索范围：官方角色页、作品页与日文原名基线
 - 本轮候选数：12
 - 本轮正式收录数：10
 - 本轮待核验数：1
@@ -760,19 +761,45 @@ def build_fixture(
 ### RESEARCH-02 | 扩大范围
 
 - 查询词、站点、资料类型与语言：别名、英文名、访谈、分集资料和对白
+- 本轮新增检索范围：新增英文别名、访谈资料与分集场景页
 - 本轮候选数：10
 - 本轮正式收录数：8
 - 本轮待核验数：1
 - 本轮排除数：1
-- 本轮新增率：0%
+- 本轮新增率：8%
 - 新增来源与卡片：新增 8 张，此后无新增
 - 未覆盖指标：全网合理可访问资料仍不足
+
+### RESEARCH-03 | 跨媒介扩展
+
+- 查询词、站点、资料类型与语言：漫画版本、广播访谈、日文长尾检索
+- 本轮新增检索范围：新增漫画版本、广播访谈与日文长尾站点
+- 本轮候选数：5
+- 本轮正式收录数：2
+- 本轮待核验数：1
+- 本轮排除数：2
+- 本轮新增率：4%
+- 新增来源与卡片：新增 2 张跨媒介表达卡
+- 未覆盖指标：仍缺少部分关系场景
+
+### RESEARCH-04 | 最后范围核验
+
+- 查询词、站点、资料类型与语言：不同译名、活动记录、角色 PV 与存档页面
+- 本轮新增检索范围：新增不同译名、活动记录、角色 PV 与网页存档
+- 本轮候选数：3
+- 本轮正式收录数：0
+- 本轮待核验数：0
+- 本轮排除数：3
+- 本轮新增率：0%
+- 新增来源与卡片：没有新增正式卡，记录三个排除项
+- 未覆盖指标：合理可访问范围已穷尽
 """
     else:
         extra_round = "" if research_profile == "一般" else """
 ### RESEARCH-03 | 低增量复查
 
 - 查询词、站点、资料类型与语言：遗漏别名、跨语言索引与长尾场景复查
+- 本轮新增检索范围：新增遗漏别名、英文索引与长尾关系场景
 - 本轮候选数：3
 - 本轮正式收录数：2
 - 本轮待核验数：0
@@ -805,6 +832,7 @@ def build_fixture(
 ### RESEARCH-01 | 初始范围
 
 - 查询词、站点、资料类型与语言：角色名、官方页、剧情页、中文和日文
+- 本轮新增检索范围：官方角色页、剧情页与原始语言名称基线
 - 本轮候选数：{card_count}
 - 本轮正式收录数：{max(card_count - 4, 0)}
 - 本轮待核验数：0
@@ -816,6 +844,7 @@ def build_fixture(
 ### RESEARCH-02 | 扩大范围
 
 - 查询词、站点、资料类型与语言：别名、多语言索引、访谈、场景资料与可靠转写
+- 本轮新增检索范围：新增别名、多语言索引、访谈与可靠转写来源
 - 本轮候选数：6
 - 本轮正式收录数：4
 - 本轮待核验数：0
@@ -1160,24 +1189,24 @@ class PersonaToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "novel-role"
             build_fixture(
-                role, "existing-character", 40, 15, 10,
+                role, "existing-character", 80, 40, 20,
                 medium="文字", context_type="内心独白",
             )
             result = persona_tool.validate_skill(role, "release")
             self.assertTrue(result["valid"], result["issues"])
-            self.assertEqual(result["metrics"]["distinct_evidence_units"], 15)
-            self.assertEqual(result["metrics"]["performance_verified_cards"], 40)
+            self.assertEqual(result["metrics"]["distinct_evidence_units"], 40)
+            self.assertEqual(result["metrics"]["performance_verified_cards"], 80)
 
     def test_real_person_releases_from_public_posts_without_dialogue_turns(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "public-person-role"
             build_fixture(
-                role, "real-person-simulation", 40, 15, 10,
+                role, "real-person-simulation", 80, 40, 20,
                 medium="公开表达", context_type="社交媒体",
             )
             result = persona_tool.validate_skill(role, "release")
             self.assertTrue(result["valid"], result["issues"])
-            self.assertEqual(result["metrics"]["distinct_evidence_units"], 15)
+            self.assertEqual(result["metrics"]["distinct_evidence_units"], 40)
             self.assertEqual(result["metrics"]["original_sources"], 3)
 
     def test_self_contained_expression_still_requires_publication_context(self) -> None:
@@ -1208,6 +1237,7 @@ class PersonaToolTests(unittest.TestCase):
             self.assertIn("dialogue.exact_original_cards_low", codes)
             self.assertIn("dialogue.source_scenes_low", codes)
             self.assertIn("dialogue.signature_cards_low", codes)
+            self.assertIn("research.non_rich_cannot_pass", codes)
             self.assertEqual(result["metrics"]["research_profile"], "一般")
 
     def test_sparse_profile_cannot_be_marked_as_target_met(self) -> None:
@@ -1220,12 +1250,12 @@ class PersonaToolTests(unittest.TestCase):
             result = persona_tool.validate_skill(role, "release")
             codes = {issue["code"] for issue in result["issues"]}
             self.assertFalse(result["valid"])
-            self.assertIn("research.sparse_cannot_pass", codes)
+            self.assertIn("research.non_rich_cannot_pass", codes)
 
     def test_target_met_requires_low_increment_saturation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "unsaturated-role"
-            build_fixture(role, "existing-character", 40, 15, 10)
+            build_fixture(role, "existing-character", 80, 40, 20)
             source_path = role / "references" / "08-来源索引.md"
             text = source_path.read_text(encoding="utf-8").replace(
                 "- 最近两轮新增率：4%, 2%", "- 最近两轮新增率：18%, 9%", 1
@@ -1333,7 +1363,7 @@ class PersonaToolTests(unittest.TestCase):
     def test_reliable_transcript_is_valid_original_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "transcript-role"
-            build_fixture(role, "existing-character", 40, 15, 10)
+            build_fixture(role, "existing-character", 80, 40, 20)
             library = role / "references" / "06-对白库.md"
             text = library.read_text(encoding="utf-8")
             text = text.replace("- 来源类型：原作明确", "- 来源类型：可靠转写")
@@ -1347,7 +1377,7 @@ class PersonaToolTests(unittest.TestCase):
             bind_evaluation_hash(role)
             result = persona_tool.validate_skill(role, "release")
             self.assertTrue(result["valid"], result["issues"])
-            self.assertEqual(result["metrics"]["exact_original_cards"], 40)
+            self.assertEqual(result["metrics"]["exact_original_cards"], 80)
 
     def test_source_locator_text_cannot_fake_scene_context(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1838,6 +1868,65 @@ class PersonaToolTests(unittest.TestCase):
             self.assertIn("research.round_audit_incomplete", codes)
             self.assertIn("research.saturation_rate_mismatch", codes)
 
+    def test_research_rounds_must_expand_to_a_new_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "repeated-research-scope"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            sources = role / "references" / "08-来源索引.md"
+            text = sources.read_text(encoding="utf-8")
+            text = text.replace(
+                "- 本轮新增检索范围：新增别名、多语言索引、访谈与可靠转写来源",
+                "- 本轮新增检索范围：仅复查",
+                1,
+            )
+            write_text(sources, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertIn("research.round_no_expansion", codes)
+
+    def test_research_rounds_cannot_repeat_the_same_declared_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "duplicate-research-scope"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            sources = role / "references" / "08-来源索引.md"
+            text = sources.read_text(encoding="utf-8")
+            text = text.replace(
+                "- 本轮新增检索范围：新增别名、多语言索引、访谈与可靠转写来源",
+                "- 本轮新增检索范围：官方角色页、剧情页与原始语言名称基线",
+                1,
+            )
+            write_text(sources, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertIn("research.round_scope_repeated", codes)
+
+    def test_research_gate_blocks_thin_corpus_without_showing_later_stage_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "thin-corpus"
+            build_fixture(role, "existing-character", 40, 15, 10)
+            (role / "tests" / "blind-record-a").unlink()
+            gate = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "persona_tool.py"), "research-gate", str(role)],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertNotEqual(gate.returncode, 0)
+            self.assertIn("PERSONA_RESEARCH_STATE=INCOMPLETE", gate.stdout)
+            self.assertIn("REQUIRED_CARDS=80", gate.stdout)
+            self.assertIn("research.non_rich_cannot_pass", gate.stdout)
+            self.assertNotIn("tests.", gate.stdout)
+
+    def test_research_gate_allows_distillation_only_after_rich_corpus(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "rich-corpus"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            gate = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "persona_tool.py"), "research-gate", str(role)],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(gate.returncode, 0, gate.stdout + gate.stderr)
+            self.assertIn("PERSONA_RESEARCH_STATE=READY", gate.stdout)
+            self.assertIn("LOOP_STAGE=REDISTILL", gate.stdout)
+
     def test_iteration_gate_routes_rule_and_test_failures(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -2227,7 +2316,7 @@ class PersonaToolTests(unittest.TestCase):
         self.assertIn("iteration-gate", creator)
         self.assertIn("只有它输出 `TERMINAL_ALLOWED=true`", creator)
         workflow = (ROOT / "references" / "05-生成与验证规范.md").read_text(encoding="utf-8")
-        self.assertIn("RESEARCH -> GENERATE -> VALIDATE -> FIX -> TEST -> ENABLE -> COMPLETE", workflow)
+        self.assertIn("RESEARCH -> RESEARCH-GATE -> GENERATE -> VALIDATE -> FIX -> TEST -> ENABLE -> COMPLETE", workflow)
         self.assertIn("不得要求用户再次发送“继续”", workflow)
         self.assertIn("用户在未完成期间询问状态、原因、限制或是否卡住时", workflow)
         self.assertIn("禁止生成脚本预填“通过”", workflow)
