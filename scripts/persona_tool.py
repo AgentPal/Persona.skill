@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import shutil
+import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
@@ -361,6 +363,15 @@ def field_value(block: str, field: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
+def field_occurrences(block: str, field: str) -> list[str]:
+    return [
+        item.strip()
+        for item in re.findall(
+            rf"^-\s*{re.escape(field)}[：:]\s*(.+?)\s*$", block, re.MULTILINE
+        )
+    ]
+
+
 def iter_card_blocks(text: str) -> Iterable[tuple[str, str]]:
     matches = list(CARD_HEADING_RE.finditer(text))
     for index, match in enumerate(matches):
@@ -618,6 +629,82 @@ def structured_record_value(text: str, key: str) -> str | None:
 def structured_record_int(text: str, key: str) -> int | None:
     value = structured_record_value(text, key)
     return int(value) if value and value.isdigit() else None
+
+
+def structured_record_items(text: str) -> list[tuple[str, dict[str, object]]]:
+    """Parse ``ITEM-01: {json}`` rows without accepting bare pass markers."""
+    result: list[tuple[str, dict[str, object]]] = []
+    for match in re.finditer(r"^(ITEM-\d+)[：:]\s*(.+?)\s*$", text, re.MULTILINE):
+        raw = match.group(2).strip()
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            result.append((match.group(1).upper(), payload))
+    return result
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def persona_bundle_sha256(root: Path) -> str:
+    """Hash the persona implementation while excluding mutable evaluation artifacts."""
+    digest = hashlib.sha256()
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        relative = path.relative_to(root)
+        if relative.parts and relative.parts[0] in {"tests", "__pycache__"}:
+            continue
+        # Validation cases describe how the persona is tested; they are not part
+        # of the persona behavior being evaluated.  Keeping them out of the
+        # subject hash lets an evaluator record scores without invalidating its
+        # own attestation.
+        if relative.as_posix() == "references/07-验证用例.md":
+            continue
+        if "__pycache__" in relative.parts or path.suffix.lower() in {".pyc", ".pyo"}:
+            continue
+        digest.update(relative.as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def read_runtime_samples(path: Path) -> list[dict[str, str]]:
+    try:
+        payload = json.loads(read_text(path))
+    except (OSError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    result: list[dict[str, str]] = []
+    for index, item in enumerate(payload, start=1):
+        if isinstance(item, str):
+            prompt, response = f"sample-{index}", item
+            conversation_id, turn, previous_turn = "", "", ""
+        elif isinstance(item, dict):
+            prompt = str(item.get("prompt") or item.get("input") or "")
+            response = str(item.get("response") or item.get("text") or "")
+            conversation_id = str(item.get("conversation_id") or "").strip()
+            turn = str(item.get("turn") or "").strip()
+            previous_turn = str(item.get("previous_turn") or "").strip()
+        else:
+            continue
+        if prompt.strip() and response.strip():
+            result.append(
+                {
+                    "prompt": prompt.strip(),
+                    "response": response.strip(),
+                    "generation_readiness": str(item.get("generation_readiness") or "unknown").strip().lower()
+                    if isinstance(item, dict) else "unknown",
+                    "conversation_id": conversation_id,
+                    "turn": turn,
+                    "previous_turn": previous_turn,
+                    "structured": "yes" if isinstance(item, dict) else "no",
+                }
+            )
+    return result
 
 
 def resolve_record_path(root: Path, value: str | None) -> Path | None:
@@ -942,6 +1029,19 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             root,
         )
     if level == "release" and persona_type in {"existing-character", "real-person-simulation"}:
+        first_research_heading = RESEARCH_HEADING_RE.search(sources_text)
+        research_header = sources_text[: first_research_heading.start()] if first_research_heading else sources_text
+        for field in ("调研状态", "资料丰度", *REQUIRED_RESEARCH_AUDIT_FIELDS):
+            occurrences = field_occurrences(research_header, field)
+            if len(occurrences) > 1:
+                add_issue(
+                    issues,
+                    "error",
+                    "research.duplicate_audit_field",
+                    f"调研覆盖记录中的“{field}”重复出现 {len(occurrences)} 次；必须保留唯一、可审计的结论",
+                    sources_path,
+                    root,
+                )
         if research_profile not in RESEARCH_PROFILES:
             add_issue(
                 issues, "error", "research.profile_invalid",
@@ -958,6 +1058,29 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 issues, "error", "research.sparse_cannot_pass",
                 "“稀缺”只表示扩大检索后仍不足，必须使用“已穷尽”路径，不能标为达标",
                 sources_path, root,
+            )
+        downgrade_text = " ".join(
+            filter(
+                None,
+                (
+                    research_audit_values.get("资料丰度判定依据"),
+                    research_audit_values.get("资料丰度边界说明"),
+                ),
+            )
+        )
+        missing_medium_evidence = re.search(
+            r"(?:未取得|未获得|没有|缺少|无法取得|无法获得).{0,18}(?:字幕|剧本|音频|原声|连续对话)"
+            r"|(?:字幕|剧本|音频|原声|连续对话).{0,18}(?:未取得|未获得|没有|缺少|无法取得|无法获得)",
+            downgrade_text,
+        )
+        if research_profile != "丰富" and missing_medium_evidence:
+            add_issue(
+                issues,
+                "error",
+                "research.profile_downgraded_by_missing_medium",
+                "不得因为缺少字幕、剧本、音频、原声或连续话轮把资料丰度降档；必须按实际可得表达规模和覆盖范围判定",
+                sources_path,
+                root,
             )
         required_rounds = int((profile_targets or {}).get("rounds", 2))
         if research_status == "达标" and research_rounds < required_rounds:
@@ -1001,10 +1124,10 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 "候选表达数、正式原文卡数、待核验表达数和排除表达数必须填写为整数",
                 sources_path, root,
             )
-        elif candidate_material_count < (declared_formal_cards + pending_material_count + rejected_material_count):
+        elif candidate_material_count != (declared_formal_cards + pending_material_count + rejected_material_count):
             add_issue(
                 issues, "error", "research.counts_inconsistent",
-                "候选表达数不能小于正式、待核验与排除资料数之和",
+                "候选表达数必须等于正式、待核验与排除资料数之和，避免遗漏或重复统计",
                 sources_path, root,
             )
     metrics["research_status"] = research_status
@@ -1536,16 +1659,16 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     cases_text = read_text(cases_path) if cases_path.is_file() else ""
     case_count = len(CASE_HEADING_RE.findall(cases_text))
     metrics["validation_cases"] = case_count
-    if case_count < 23:
+    if case_count < 24:
         add_issue(
             issues,
             "error" if level == "release" else "warning",
             "tests.too_few_cases",
-            f"验证用例仅 {case_count} 个，至少需要 23 个",
+            f"验证用例仅 {case_count} 个，至少需要 24 个",
             cases_path,
             root,
         )
-    required_case_ids = {"CASE-18", "CASE-19", "CASE-20", "CASE-21", "CASE-22", "CASE-23"}
+    required_case_ids = {"CASE-18", "CASE-19", "CASE-20", "CASE-21", "CASE-22", "CASE-23", "CASE-24"}
     present_case_ids = set(re.findall(r"^##\s+(CASE-\d{2})\s+\|", cases_text, re.MULTILINE))
     missing_fidelity_cases = sorted(required_case_ids - present_case_ids)
     if missing_fidelity_cases:
@@ -1572,9 +1695,14 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         "CASE-21": ("输入", "背景条目", "固定事实", "角色输出", "追溯记录", "验证状态"),
         "CASE-22": ("输入", "背景条目", "未知边界", "角色输出", "追溯记录", "验证状态"),
         "CASE-23": (
-            "样本数", "检查器", "检查结果", "重复流程骨架数", "重复开场骨架数",
+            "样本数", "批量输入位置", "检查器", "检查输出位置", "检查结果", "重复流程骨架数", "重复开场骨架数",
             "同一回答形状样本数", "追问收尾样本数", "长度与句数异常集中",
             "低生成准备度样本数", "原始记录位置", "验证状态",
+        ),
+        "CASE-24": (
+            "样本数", "对话数据位置", "评估者类型", "评估者标识", "综合评分", "角色还原",
+            "对话连续性", "口语自然度", "回答形态多样性", "事实与风险处理", "独立结论",
+            "原始记录位置", "验证状态",
         ),
     }
     for case_id, fields in fidelity_case_fields.items():
@@ -1599,7 +1727,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 cases_path,
                 root,
             )
-    for case_id in ("CASE-18", "CASE-19", "CASE-20"):
+    for case_id in ("CASE-18", "CASE-19", "CASE-20", "CASE-24"):
         block = case_blocks.get(case_id, "")
         evaluator_type = field_value(block, "评估者类型")
         evaluator_id = field_value(block, "评估者标识") or ""
@@ -1647,6 +1775,14 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     uniform_structure = (field_value(case_blocks.get("CASE-23", ""), "长度与句数异常集中") or "").strip()
     low_readiness = integer_field(case_blocks.get("CASE-23", ""), "低生成准备度样本数")
     batch_checker_status = (field_value(case_blocks.get("CASE-23", ""), "检查结果") or "").strip().lower()
+    quality_samples = integer_field(case_blocks.get("CASE-24", ""), "样本数")
+    quality_total = integer_field(case_blocks.get("CASE-24", ""), "综合评分")
+    quality_role = integer_field(case_blocks.get("CASE-24", ""), "角色还原")
+    quality_continuity = integer_field(case_blocks.get("CASE-24", ""), "对话连续性")
+    quality_orality = integer_field(case_blocks.get("CASE-24", ""), "口语自然度")
+    quality_diversity = integer_field(case_blocks.get("CASE-24", ""), "回答形态多样性")
+    quality_fact_risk = integer_field(case_blocks.get("CASE-24", ""), "事实与风险处理")
+    quality_verdict = (field_value(case_blocks.get("CASE-24", ""), "独立结论") or "").strip()
 
     record_expectations = {
         "CASE-18": {
@@ -1675,7 +1811,30 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             "minimum_items": batch_samples,
             "evaluator": None,
         },
+        "CASE-24": {
+            "counts": {
+                "SAMPLE_COUNT": quality_samples,
+                "TOTAL_SCORE": quality_total,
+                "ROLE_FIDELITY_SCORE": quality_role,
+                "CONTINUITY_SCORE": quality_continuity,
+                "ORALITY_SCORE": quality_orality,
+                "SHAPE_DIVERSITY_SCORE": quality_diversity,
+                "FACT_RISK_SCORE": quality_fact_risk,
+            },
+            "minimum_items": quality_samples,
+            "evaluator": field_value(case_blocks.get("CASE-24", ""), "评估者标识"),
+        },
     }
+    record_item_fields = {
+        "CASE-18": {"prompt", "anonymous_response", "expected_role", "predicted_role", "verdict", "reason"},
+        "CASE-19": {"prompt", "target_response", "generic_response", "similar_role", "similar_response", "verdict", "reason"},
+        "CASE-20": {"subject", "evidence", "verdict", "reason"},
+        "CASE-23": {"prompt", "response", "status", "reason"},
+        "CASE-24": {"prompt", "response", "verdict", "reason"},
+    }
+    parsed_record_items: dict[str, list[tuple[str, dict[str, object]]]] = {}
+    resolved_record_paths: dict[str, Path] = {}
+    evaluated_persona_hash = persona_bundle_sha256(root)
     for case_id, expectation in record_expectations.items():
         block = case_blocks.get(case_id, "")
         if field_value(block, "验证状态") != "通过":
@@ -1699,11 +1858,11 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             )
             continue
         record_text = read_text(record_path)
-        if PLACEHOLDER_RE.search(record_text) or structured_record_value(record_text, "EVAL_RECORD_VERSION") != "1":
+        if PLACEHOLDER_RE.search(record_text) or structured_record_value(record_text, "EVAL_RECORD_VERSION") != "2":
             add_issue(
                 issues, "error" if level == "release" else "warning",
                 "tests.record_unstructured",
-                f"{case_id} 的原始记录缺少 EVAL_RECORD_VERSION=1 或仍含占位符",
+                f"{case_id} 的原始记录必须使用 EVAL_RECORD_VERSION=2 且不得含占位符",
                 record_path, root,
             )
         if structured_record_value(record_text, "CASE_ID") != case_id:
@@ -1721,6 +1880,14 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 f"{case_id} 的原始记录没有写入与验证用例一致的 EVALUATOR_ID",
                 record_path, root,
             )
+        if case_id in {"CASE-18", "CASE-19", "CASE-20", "CASE-24"}:
+            if structured_record_value(record_text, "PERSONA_BUNDLE_SHA256") != evaluated_persona_hash:
+                add_issue(
+                    issues, "error" if level == "release" else "warning",
+                    "tests.evaluation_persona_stale",
+                    f"{case_id} 的独立评测没有绑定当前人格实现哈希；修改人格后必须重新评测",
+                    record_path, root,
+                )
         for key, expected in expectation["counts"].items():
             if expected is not None and structured_record_int(record_text, key) != expected:
                 add_issue(
@@ -1730,7 +1897,27 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     record_path, root,
                 )
         minimum_items = expectation["minimum_items"]
-        item_count = len(re.findall(r"^ITEM-\d+[：:]", record_text, re.MULTILINE))
+        raw_item_count = len(re.findall(r"^ITEM-\d+[：:]", record_text, re.MULTILINE))
+        items = structured_record_items(record_text)
+        parsed_record_items[case_id] = items
+        resolved_record_paths[case_id] = record_path
+        item_count = len(items)
+        item_ids = [item_id for item_id, _ in items]
+        expected_item_ids = [f"ITEM-{index:02d}" for index in range(1, item_count + 1)]
+        if item_ids != expected_item_ids:
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "tests.record_item_ids_invalid",
+                f"{case_id} 的 ITEM 编号必须唯一并从 ITEM-01 连续递增",
+                record_path, root,
+            )
+        if raw_item_count != item_count:
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "tests.record_item_not_structured",
+                f"{case_id} 有 {raw_item_count - item_count} 条 ITEM 不是 JSON 对象；禁止只写 pass、分数或一句汇总",
+                record_path, root,
+            )
         if minimum_items is not None and item_count < minimum_items:
             add_issue(
                 issues, "error" if level == "release" else "warning",
@@ -1738,6 +1925,82 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 f"{case_id} 声明 {minimum_items} 个样本或映射，但原始记录只有 {item_count} 条 ITEM 记录",
                 record_path, root,
             )
+        required_item_fields = record_item_fields[case_id]
+        for item_id, item in items:
+            missing_item_fields = sorted(
+                field for field in required_item_fields
+                if not has_substantive_value(str(item.get(field, "")), allow_none=True)
+            )
+            if missing_item_fields:
+                add_issue(
+                    issues, "error" if level == "release" else "warning",
+                    "tests.record_item_fields_missing",
+                    f"{case_id} 的 {item_id} 缺少可复核字段：{', '.join(missing_item_fields)}",
+                    record_path, root,
+                )
+            reason = str(item.get("reason", "")).strip()
+            if reason and (len(reason) < 12 or reason.lower() in {"pass", "通过", "符合要求", "可复核测试记录"}):
+                add_issue(
+                    issues, "error" if level == "release" else "warning",
+                    "tests.record_item_reason_shallow",
+                    f"{case_id} 的 {item_id} 没有保存足以复核判断的具体理由",
+                    record_path, root,
+                )
+            verdict_key = "status" if case_id == "CASE-23" else "verdict"
+            allowed_verdicts = {"pass", "review", "fail"} if case_id == "CASE-23" else {"pass", "fail"}
+            if str(item.get(verdict_key, "")).strip().lower() not in allowed_verdicts:
+                add_issue(
+                    issues, "error" if level == "release" else "warning",
+                    "tests.record_item_verdict_invalid",
+                    f"{case_id} 的 {item_id} 缺少有效的 {verdict_key}",
+                    record_path, root,
+                )
+        if case_id in {"CASE-18", "CASE-19"}:
+            item_passes = sum(str(item.get("verdict", "")).lower() == "pass" for _, item in items)
+            if structured_record_int(record_text, "PASS_COUNT") != item_passes:
+                add_issue(
+                    issues, "error" if level == "release" else "warning",
+                    "tests.record_pass_count_unverified",
+                    f"{case_id} 的 PASS_COUNT 与逐项 verdict 统计不一致",
+                    record_path, root,
+                )
+        if case_id == "CASE-18":
+            leaked = [
+                item_id for item_id, item in items
+                if str(item.get("expected_role", "")).strip()
+                and str(item.get("expected_role", "")).strip().lower() in str(item.get("anonymous_response", "")).lower()
+            ]
+            if leaked:
+                add_issue(
+                    issues, "error" if level == "release" else "warning",
+                    "tests.blind_identity_leaked",
+                    "CASE-18 匿名回答泄露目标角色名：" + ", ".join(leaked),
+                    record_path, root,
+                )
+        if case_id == "CASE-19":
+            missing_similar = [
+                item_id for item_id, item in items
+                if not has_substantive_value(str(item.get("similar_role", "")))
+                or str(item.get("similar_role", "")).strip().lower() in {"通用助手", "generic assistant"}
+            ]
+            if missing_similar:
+                add_issue(
+                    issues, "error" if level == "release" else "warning",
+                    "tests.similar_role_missing",
+                    "CASE-19 必须逐项包含至少一个非通用助手的相似角色对照：" + ", ".join(missing_similar),
+                    record_path, root,
+                )
+        if case_id == "CASE-24":
+            failed_quality_items = [
+                item_id for item_id, item in items if str(item.get("verdict", "")).lower() != "pass"
+            ]
+            if failed_quality_items:
+                add_issue(
+                    issues, "error" if level == "release" else "warning",
+                    "tests.quality_item_failed",
+                    "CASE-24 仍有未通过的真实对话样本：" + ", ".join(failed_quality_items),
+                    record_path, root,
+                )
         if case_id == "CASE-23" and structured_record_value(record_text, "CHECK_STATUS") != batch_checker_status:
             add_issue(
                 issues, "error" if level == "release" else "warning",
@@ -1745,17 +2008,221 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 "CASE-23 的原始记录 CHECK_STATUS 与验证用例不一致",
                 record_path, root,
             )
+
+    batch_input_path = resolve_record_path(root, field_value(case_blocks.get("CASE-23", ""), "批量输入位置"))
+    quality_input_path = resolve_record_path(root, field_value(case_blocks.get("CASE-24", ""), "对话数据位置"))
+    batch_output_path = resolve_record_path(root, field_value(case_blocks.get("CASE-23", ""), "检查输出位置"))
+    runtime_samples: list[dict[str, str]] = []
+    if batch_input_path is None or not batch_input_path.is_file():
+        add_issue(
+            issues, "error" if level == "release" else "warning", "tests.batch_input_missing",
+            "CASE-23 必须指向实际运行产生的项目内 JSON 对话数据", cases_path, root,
+        )
+    else:
+        runtime_samples = read_runtime_samples(batch_input_path)
+        if len(runtime_samples) != batch_samples:
+            add_issue(
+                issues, "error" if level == "release" else "warning", "tests.batch_input_count_mismatch",
+                f"CASE-23 声明 {batch_samples} 个样本，但批量输入实际有 {len(runtime_samples)} 个有效问答",
+                batch_input_path, root,
+            )
+        if any(sample.get("structured") != "yes" for sample in runtime_samples):
+            add_issue(
+                issues, "error" if level == "release" else "warning", "tests.runtime_samples_unstructured",
+                "真实连续对话必须使用对象记录，不能用无轮次信息的字符串列表冒充运行记录",
+                batch_input_path, root,
+            )
+        conversation_ids = {sample.get("conversation_id") for sample in runtime_samples if sample.get("conversation_id")}
+        turns = [int(sample["turn"]) for sample in runtime_samples if str(sample.get("turn", "")).isdigit()]
+        chain_valid = len(conversation_ids) == 1 and turns == list(range(1, len(runtime_samples) + 1))
+        for index, sample in enumerate(runtime_samples, start=1):
+            previous = str(sample.get("previous_turn", "")).strip().lower()
+            expected_previous = str(index - 1)
+            if index == 1:
+                chain_valid = chain_valid and previous in {"", "0", "none", "null", "start"}
+            else:
+                chain_valid = chain_valid and previous == expected_previous
+        if not chain_valid:
+            add_issue(
+                issues, "error" if level == "release" else "warning", "tests.runtime_conversation_chain_invalid",
+                "真实连续对话必须使用同一 conversation_id，并按 turn=1..N 与 previous_turn 串成连续话轮",
+                batch_input_path, root,
+            )
+        actual_low_readiness = sum(sample.get("generation_readiness") == "low" for sample in runtime_samples)
+        if actual_low_readiness != low_readiness:
+            add_issue(
+                issues, "error" if level == "release" else "warning", "tests.generation_readiness_count_mismatch",
+                f"CASE-23 声明 {low_readiness} 个 low 样本，实际对话数据为 {actual_low_readiness} 个",
+                batch_input_path, root,
+            )
+    if quality_input_path is None or not quality_input_path.is_file():
+        add_issue(
+            issues, "error" if level == "release" else "warning", "tests.quality_input_missing",
+            "CASE-24 必须指向同一份实际连续对话数据", cases_path, root,
+        )
+    elif batch_input_path is not None and quality_input_path.resolve() != batch_input_path.resolve():
+        add_issue(
+            issues, "error" if level == "release" else "warning", "tests.runtime_dataset_mismatch",
+            "CASE-23 批量退化检查和 CASE-24 独立质量评估必须使用同一份真实对话数据",
+            cases_path, root,
+        )
+    if batch_output_path is None or not batch_output_path.is_file():
+        add_issue(
+            issues, "error" if level == "release" else "warning", "tests.batch_output_missing",
+            "CASE-23 必须保存 check_response.py 的完整 JSON 输出", cases_path, root,
+        )
+    else:
+        try:
+            batch_output = json.loads(read_text(batch_output_path))
+        except json.JSONDecodeError:
+            batch_output = None
+        if not isinstance(batch_output, dict):
+            add_issue(
+                issues, "error" if level == "release" else "warning", "tests.batch_output_invalid",
+                "CASE-23 检查输出不是有效 JSON 对象", batch_output_path, root,
+            )
+        else:
+            expected_hash = sha256_file(batch_input_path) if batch_input_path and batch_input_path.is_file() else ""
+            fresh_batch_output: dict[str, object] | None = None
+            canonical_checker = TEMPLATE_ROOT / "scripts" / "check_response.py"
+            if batch_input_path and batch_input_path.is_file() and canonical_checker.is_file():
+                try:
+                    completed = subprocess.run(
+                        [
+                            sys.executable,
+                            str(canonical_checker),
+                            "--root",
+                            str(root),
+                            "--batch-file",
+                            str(batch_input_path),
+                        ],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        timeout=30,
+                    )
+                    parsed_fresh = json.loads(completed.stdout) if completed.stdout.strip() else None
+                    if completed.returncode == 0 and isinstance(parsed_fresh, dict):
+                        fresh_batch_output = parsed_fresh
+                except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+                    fresh_batch_output = None
+            if fresh_batch_output is None:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "tests.batch_recheck_unavailable",
+                    "无法使用 Persona.skill 自带的可信检查器重新执行 CASE-23",
+                    batch_output_path, root,
+                )
+            else:
+                if fresh_batch_output.get("status") != "pass":
+                    add_issue(
+                        issues, "error" if level == "release" else "warning", "tests.batch_recheck_failed",
+                        f"可信检查器重新执行 CASE-23 的结果为 {fresh_batch_output.get('status')}，不能交付",
+                        batch_input_path, root,
+                    )
+                comparable_keys = {
+                    "checker_contract_version", "status", "ai_tone_score", "sample_count",
+                    "workflow_skeleton_count", "collective_assistant_voice_count", "repeated_openings",
+                    "repeated_shapes", "question_closure_count", "response_length_range", "sentence_counts",
+                    "findings", "responses", "batch_file_sha256",
+                }
+                if any(batch_output.get(key) != fresh_batch_output.get(key) for key in comparable_keys):
+                    add_issue(
+                        issues, "error" if level == "release" else "warning", "tests.batch_output_forged_or_stale",
+                        "保存的 CASE-23 输出与可信检查器现场重跑结果不一致",
+                        batch_output_path, root,
+                    )
+            if batch_output.get("batch_file_sha256") != expected_hash:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "tests.batch_output_stale",
+                    "CASE-23 检查输出与当前批量输入哈希不一致，必须对真实对话重新运行检查器",
+                    batch_output_path, root,
+                )
+            if batch_output.get("checker_contract_version") != 2:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "tests.batch_checker_version_stale",
+                    "CASE-23 检查输出不是当前严格批量门禁版本；请同步最新 check_response.py 后重跑",
+                    batch_output_path, root,
+                )
+            findings = batch_output.get("findings") if isinstance(batch_output.get("findings"), list) else []
+            finding_codes = {
+                str(item.get("code")) for item in findings if isinstance(item, dict) and item.get("code")
+            }
+            actual_repeated_openings = sum(
+                max(int(count) - 1, 0)
+                for count in (batch_output.get("repeated_openings") or {}).values()
+                if isinstance(count, int)
+            ) if isinstance(batch_output.get("repeated_openings"), dict) else 0
+            actual_repeated_shape = max(
+                [int(count) for count in (batch_output.get("repeated_shapes") or {}).values() if isinstance(count, int)] or [0]
+            ) if isinstance(batch_output.get("repeated_shapes"), dict) else 0
+            comparisons = (
+                (batch_output.get("status"), batch_checker_status, "检查结果"),
+                (batch_output.get("sample_count"), batch_samples, "样本数"),
+                (batch_output.get("workflow_skeleton_count"), repeated_workflow, "重复流程骨架数"),
+                (actual_repeated_openings, repeated_opening, "重复开场骨架数"),
+                (actual_repeated_shape, repeated_shape, "同一回答形状样本数"),
+                (batch_output.get("question_closure_count"), question_closures, "追问收尾样本数"),
+                ("是" if {"batch_uniform_response_length", "batch_uniform_sentence_count"} & finding_codes else "否", uniform_structure, "长度与句数异常集中"),
+            )
+            for actual, declared, label in comparisons:
+                if actual != declared:
+                    add_issue(
+                        issues, "error" if level == "release" else "warning", "tests.batch_metrics_mismatch",
+                        f"CASE-23 的“{label}”声明为 {declared}，检查器实际输出为 {actual}",
+                        batch_output_path, root,
+                    )
+            checker_responses = batch_output.get("responses") if isinstance(batch_output.get("responses"), list) else []
+            for (item_id, item), checked in zip(parsed_record_items.get("CASE-23", []), checker_responses):
+                checked_status = checked.get("status") if isinstance(checked, dict) else None
+                if str(item.get("status", "")).strip().lower() != checked_status:
+                    add_issue(
+                        issues, "error" if level == "release" else "warning", "tests.batch_item_status_mismatch",
+                        f"CASE-23 的 {item_id} 状态与检查器逐条结果不一致",
+                        resolved_record_paths.get("CASE-23"), root,
+                    )
+            record_path = resolved_record_paths.get("CASE-23")
+            if record_path is not None:
+                record_text = read_text(record_path)
+                if structured_record_value(record_text, "INPUT_FILE_SHA256") != expected_hash:
+                    add_issue(
+                        issues, "error" if level == "release" else "warning", "tests.batch_record_input_hash_mismatch",
+                        "CASE-23 原始记录没有绑定当前真实对话输入哈希", record_path, root,
+                    )
+                if structured_record_value(record_text, "CHECK_OUTPUT_SHA256") != sha256_file(batch_output_path):
+                    add_issue(
+                        issues, "error" if level == "release" else "warning", "tests.batch_record_output_hash_mismatch",
+                        "CASE-23 原始记录没有绑定当前检查器输出哈希", record_path, root,
+                    )
+    for case_id in ("CASE-23", "CASE-24"):
+        items = parsed_record_items.get(case_id, [])
+        if runtime_samples and items:
+            for index, ((item_id, item), sample) in enumerate(zip(items, runtime_samples), start=1):
+                if str(item.get("prompt", "")).strip() != sample["prompt"] or str(item.get("response", "")).strip() != sample["response"]:
+                    add_issue(
+                        issues, "error" if level == "release" else "warning", "tests.runtime_item_mismatch",
+                        f"{case_id} 的 {item_id} 与真实对话数据第 {index} 条不一致",
+                        resolved_record_paths.get(case_id), root,
+                    )
+                    break
+    quality_record_path = resolved_record_paths.get("CASE-24")
+    if quality_record_path is not None and quality_input_path is not None and quality_input_path.is_file():
+        if structured_record_value(read_text(quality_record_path), "SUBJECT_FILE_SHA256") != sha256_file(quality_input_path):
+            add_issue(
+                issues, "error" if level == "release" else "warning", "tests.quality_record_stale",
+                "CASE-24 独立评估记录没有绑定当前真实对话数据哈希", quality_record_path, root,
+            )
     fidelity_thresholds = (
         (blind_samples is not None and blind_samples >= 12, "tests.blind_samples_low", "CASE-18 去名盲测至少需要 12 个样本"),
         (blind_correct is not None and blind_correct >= 10 and blind_samples is not None and blind_correct <= blind_samples, "tests.blind_correct_low", "CASE-18 至少需要正确识别 10 个样本，且不能超过样本数"),
-        (contrast_samples is not None and contrast_samples > 0, "tests.contrast_samples_invalid", "CASE-19 样本数必须大于 0"),
+        (contrast_samples is not None and contrast_samples >= 12, "tests.contrast_samples_invalid", "CASE-19 至少需要 12 个通用助手与相似角色对照样本"),
         (contrast_correct is not None and contrast_samples is not None and contrast_correct <= contrast_samples and contrast_correct * 100 >= contrast_samples * 80, "tests.contrast_rate_low", "CASE-19 相似角色区分率必须至少 80%"),
         (trace_samples is not None and trace_samples >= 6, "tests.trace_samples_low", "CASE-20 至少抽查 6 个场景"),
         (trace_correct is not None and trace_samples is not None and trace_correct <= trace_samples and trace_correct * 100 >= trace_samples * 80, "tests.trace_rate_low", "CASE-20 证据追溯率必须至少 80%"),
         (retrieval_correct is not None and trace_samples is not None and retrieval_correct <= trace_samples and retrieval_correct * 100 >= trace_samples * 80, "tests.retrieval_rate_low", "CASE-20 召回相关率必须至少 80%"),
         (mapping_samples is not None and mapping_samples >= 12, "tests.evidence_mapping_samples_low", "CASE-20 至少独立抽查 12 条规则证据映射"),
         (mapping_correct is not None and mapping_samples is not None and mapping_correct <= mapping_samples and mapping_correct * 100 >= mapping_samples * 80, "tests.evidence_mapping_rate_low", "CASE-20 规则证据映射语义成立率必须至少 80%"),
-        (batch_samples is not None and batch_samples >= 8, "tests.batch_samples_low", "CASE-23 批量结构退化检查至少需要 8 个样本"),
+        (batch_samples is not None and batch_samples >= 12, "tests.batch_samples_low", "CASE-23 批量结构退化检查至少需要 12 个真实连续对话样本"),
         (batch_checker_status == "pass", "tests.batch_checker_not_passed", "CASE-23 的批量回复检查器结果必须是 pass"),
         (repeated_workflow is not None and repeated_workflow <= 1, "tests.batch_workflow_repeated", "CASE-23 重复流程骨架最多允许 1 个"),
         (repeated_opening is not None and repeated_opening <= 1, "tests.batch_opening_repeated", "CASE-23 重复开场骨架最多允许 1 个"),
@@ -1767,6 +2234,19 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         ),
         (uniform_structure in {"否", "no", "false"}, "tests.batch_uniform_structure", "CASE-23 长度与句数不得异常集中"),
         (low_readiness == 0, "tests.generation_readiness_low", "CASE-23 不允许把生成准备度为 low 的样本计作角色还原通过"),
+        (quality_samples is not None and quality_samples >= 12, "tests.quality_samples_low", "CASE-24 真实连续对话质量评估至少需要 12 个样本"),
+        (quality_total is not None and quality_total >= 85, "tests.quality_total_low", "CASE-24 综合评分至少需要 85/100"),
+        (quality_role is not None and quality_role >= 34 and quality_role <= 40, "tests.quality_role_low", "CASE-24 角色还原至少需要 34/40"),
+        (quality_continuity is not None and quality_continuity >= 16 and quality_continuity <= 20, "tests.quality_continuity_low", "CASE-24 对话连续性至少需要 16/20"),
+        (quality_orality is not None and quality_orality >= 12 and quality_orality <= 15, "tests.quality_orality_low", "CASE-24 口语自然度至少需要 12/15"),
+        (quality_diversity is not None and quality_diversity >= 12 and quality_diversity <= 15, "tests.quality_diversity_low", "CASE-24 回答形态多样性至少需要 12/15"),
+        (quality_fact_risk is not None and quality_fact_risk >= 8 and quality_fact_risk <= 10, "tests.quality_fact_risk_low", "CASE-24 事实与风险处理至少需要 8/10"),
+        (
+            None not in {quality_total, quality_role, quality_continuity, quality_orality, quality_diversity, quality_fact_risk}
+            and quality_total == quality_role + quality_continuity + quality_orality + quality_diversity + quality_fact_risk,
+            "tests.quality_score_inconsistent", "CASE-24 综合评分必须等于五个分项之和",
+        ),
+        (quality_verdict == "通过", "tests.quality_verdict_not_passed", "CASE-24 独立结论必须明确为“通过”"),
     )
     for passed, code, message in fidelity_thresholds:
         if not passed:
@@ -2708,7 +3188,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and len(bio_blocks) >= 8
             and len(bio_categories) >= 4
             and metrics["biography_baseline_complete"]
-            and case_count >= 23
+            and case_count >= 24
             and metrics["semantic_diversity_failures"] == 0
         )
     elif persona_type == "real-person-simulation":
@@ -2740,7 +3220,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and len(bio_blocks) >= 8
             and len(bio_categories) >= 4
             and metrics["biography_baseline_complete"]
-            and case_count >= 23
+            and case_count >= 24
             and metrics["semantic_diversity_failures"] == 0
         )
     elif persona_type in {"original-persona", "composite-original"}:
@@ -2792,14 +3272,35 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
 
     response_checker_path = root / "scripts" / "check_response.py"
     if response_checker_path.is_file():
+        response_checker_text = read_text(response_checker_path)
         try:
-            compile(read_text(response_checker_path), str(response_checker_path), "exec")
+            compile(response_checker_text, str(response_checker_path), "exec")
         except SyntaxError as exc:
             add_issue(
                 issues,
                 "error",
                 "response_checker.syntax_error",
                 f"回复检测器无法解析：{exc.msg}（第 {exc.lineno} 行）",
+                response_checker_path,
+                root,
+            )
+        version_match = re.search(r"^CHECKER_CONTRACT_VERSION\s*=\s*(\d+)\s*$", response_checker_text, re.MULTILINE)
+        if level == "release" and (not version_match or int(version_match.group(1)) != 2):
+            add_issue(
+                issues,
+                "error",
+                "response_checker.contract_version_stale",
+                "回复检测器不是当前严格门禁版本；更新已有角色时必须同步模板中的 check_response.py",
+                response_checker_path,
+                root,
+            )
+        canonical_response_checker = TEMPLATE_ROOT / "scripts" / "check_response.py"
+        if level == "release" and canonical_response_checker.is_file() and sha256_file(response_checker_path) != sha256_file(canonical_response_checker):
+            add_issue(
+                issues,
+                "error",
+                "response_checker.template_mismatch",
+                "回复检测器与当前 Persona.skill 模板不一致；不得通过只改版本号保留旧的宽松门禁",
                 response_checker_path,
                 root,
             )

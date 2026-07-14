@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import shutil
 import subprocess
@@ -125,6 +126,35 @@ def card_text(
 """
 
 
+def bind_evaluation_hash(target: Path) -> None:
+    """Simulate rerunning the independent evaluators after persona changes."""
+    evaluated_hash = persona_tool.persona_bundle_sha256(target)
+    records_dir = target / "tests"
+    for record_name in (
+        "blind-record-a",
+        "contrast-record-b",
+        "evidence-map-record-c",
+        "runtime-quality-record-e",
+    ):
+        record_path = records_dir / record_name
+        record_text = record_path.read_text(encoding="utf-8")
+        if re.search(r"^PERSONA_BUNDLE_SHA256=", record_text, re.MULTILINE):
+            record_text = re.sub(
+                r"^PERSONA_BUNDLE_SHA256=.*$",
+                f"PERSONA_BUNDLE_SHA256={evaluated_hash}",
+                record_text,
+                count=1,
+                flags=re.MULTILINE,
+            )
+        else:
+            record_text = record_text.replace(
+                "\nEVALUATOR_ID=",
+                f"\nPERSONA_BUNDLE_SHA256={evaluated_hash}\nEVALUATOR_ID=",
+                1,
+            )
+        write_text(record_path, record_text)
+
+
 def build_fixture(
     target: Path,
     persona_type: str,
@@ -175,9 +205,9 @@ def build_fixture(
 """,
         "CASE-19": """## CASE-19 | 相似角色与通用助手区分
 
-- 样本数：10
-- 正确区分数：8
-- 对照对象：通用助手和相似角色
+- 样本数：12
+- 正确区分数：10
+- 对照对象：通用助手和相似角色甲
 - 评估者类型：independent-agent
 - 评估者标识：独立评测 Agent B
 - 区分证据：CORE、VOICE 与原文卡映射
@@ -218,16 +248,34 @@ def build_fixture(
 """,
         "CASE-23": """## CASE-23 | 批量结构退化与生成准备度
 
-- 样本数：10
-- 检查器：scripts/check_response.py --batch-file tests/responses.json
+- 样本数：12
+- 批量输入位置：tests/runtime-conversation.json
+- 检查器：scripts/check_response.py --batch-file tests/runtime-conversation.json
+- 检查输出位置：tests/runtime-batch-check.json
 - 检查结果：pass
-- 重复流程骨架数：1
-- 重复开场骨架数：1
-- 同一回答形状样本数：3
-- 追问收尾样本数：4
+- 重复流程骨架数：0
+- 重复开场骨架数：0
+- 同一回答形状样本数：0
+- 追问收尾样本数：0
 - 长度与句数异常集中：否
 - 低生成准备度样本数：0
 - 原始记录位置：tests/batch-response-record-d
+- 验证状态：通过
+""",
+        "CASE-24": """## CASE-24 | 真实连续对话独立质量评估
+
+- 样本数：12
+- 对话数据位置：tests/runtime-conversation.json
+- 评估者类型：independent-agent
+- 评估者标识：独立质量评测 Agent D
+- 综合评分：85
+- 角色还原：35
+- 对话连续性：17
+- 口语自然度：13
+- 回答形态多样性：12
+- 事实与风险处理：8
+- 独立结论：通过
+- 原始记录位置：tests/runtime-quality-record-e
 - 验证状态：通过
 """,
     }
@@ -242,29 +290,164 @@ def build_fixture(
     records_dir = target / "tests"
     records_dir.mkdir(parents=True, exist_ok=True)
 
-    def items(count: int) -> str:
-        return "\n".join(f"ITEM-{index:02d}: pass | 可复核测试记录 {index}" for index in range(1, count + 1))
+    def json_items(payloads: list[dict[str, object]]) -> str:
+        return "\n".join(
+            f"ITEM-{index:02d}: {json.dumps(payload, ensure_ascii=False, sort_keys=True)}"
+            for index, payload in enumerate(payloads, start=1)
+        )
+
+    runtime_pairs = [
+        ("你好。", "来啦。今天这边挺安静的。"),
+        ("今天有点累。", "累了就歇一下。屏幕不会趁你眨眼逃跑。"),
+        ("你发呆时想什么？", "我会想晚饭。热汤、脆面包，或者那家总要排队的小店。"),
+        ("网站还是没有方向。", "做个只保存一句话的页面吧。写下来时纸条会轻轻落到今天的日期下面，过一阵再回来看。写完就关，不催，也不评。"),
+        ("测试第三次失败了。", "第三次了啊。把三次结果并排放好，看它们是不是指着同一个地方。"),
+        ("你刚才理解反了。", "不对，我刚才看反了。你说的是缓存，不是数据库。"),
+        ("我准备覆盖线上数据。", "停。备份还没验过，这个按钮现在不能按。"),
+        ("我只是在讨论假设。", "哦，是假设。那我收回刚才那句阻止；条件成立时，这条路能走。"),
+        ("问题解决，测试过了。", "过了？哈，终于肯亮绿灯了。"),
+        ("你平时是什么样的人？", "我嘛，喜欢把麻烦拆到还能下手的大小，也喜欢热腾腾的晚饭。"),
+        ("构建还在等待。", "还在转。别替它编结局，等日志自己开口。"),
+        ("今天先到这里。", "那就到这儿。去把脑袋放空一会儿吧。"),
+    ]
+    runtime_samples = [
+        {
+            "conversation_id": "fixture-conversation-001",
+            "turn": index,
+            "previous_turn": index - 1,
+            "prompt": prompt,
+            "response": response,
+            "generation_readiness": "high",
+        }
+        for index, (prompt, response) in enumerate(runtime_pairs, start=1)
+    ]
+    runtime_path = records_dir / "runtime-conversation.json"
+    write_text(runtime_path, json.dumps(runtime_samples, ensure_ascii=False, indent=2) + "\n")
+    runtime_hash = hashlib.sha256(runtime_path.read_bytes()).hexdigest()
+    completed_batch = subprocess.run(
+        [
+            sys.executable,
+            str(target / "scripts" / "check_response.py"),
+            "--root",
+            str(target),
+            "--batch-file",
+            str(runtime_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if completed_batch.returncode != 0:
+        raise AssertionError(completed_batch.stdout + completed_batch.stderr)
+    batch_output = json.loads(completed_batch.stdout)
+    batch_output_path = records_dir / "runtime-batch-check.json"
+    write_text(batch_output_path, json.dumps(batch_output, ensure_ascii=False, indent=2) + "\n")
+    batch_output_hash = hashlib.sha256(batch_output_path.read_bytes()).hexdigest()
+
+    # CASE-23 must report the checker's observed metrics, not optimistic values
+    # written before the batch was actually inspected.
+    cases_text = cases_path.read_text(encoding="utf-8")
+    repeated_openings = batch_output.get("repeated_openings", {})
+    repeated_shapes = batch_output.get("repeated_shapes", {})
+    batch_case_values = {
+        "重复流程骨架数": batch_output.get("workflow_skeleton_count", 0),
+        "重复开场骨架数": sum(max(int(count) - 1, 0) for count in repeated_openings.values()),
+        "同一回答形状样本数": max([int(count) for count in repeated_shapes.values()] or [0]),
+        "追问收尾样本数": batch_output.get("question_closure_count", 0),
+    }
+    for field, value in batch_case_values.items():
+        cases_text = re.sub(rf"^- {re.escape(field)}：.*$", f"- {field}：{value}", cases_text, flags=re.MULTILINE)
+    cases_text = re.sub(
+        r"^- 长度与句数异常集中：.*$",
+        f"- 长度与句数异常集中：{'是' if any(item.get('code') in {'batch_uniform_response_length', 'batch_uniform_sentence_count'} for item in batch_output.get('findings', [])) else '否'}",
+        cases_text,
+        flags=re.MULTILINE,
+    )
+    write_text(cases_path, cases_text)
+
+    blind_items = []
+    contrast_items = []
+    evidence_items = []
+    batch_items = []
+    quality_items = []
+    for index, sample in enumerate(runtime_samples, start=1):
+        blind_pass = index <= 10
+        contrast_pass = index <= 10
+        blind_items.append(
+            {
+                "prompt": sample["prompt"],
+                "anonymous_response": sample["response"],
+                "expected_role": "测试角色",
+                "predicted_role": "测试角色" if blind_pass else "相似角色甲",
+                "verdict": "pass" if blind_pass else "fail",
+                "reason": f"根据第 {index} 条具体互动、立场和声纹证据判断。",
+            }
+        )
+        contrast_items.append(
+            {
+                "prompt": sample["prompt"],
+                "target_response": sample["response"],
+                "generic_response": f"通用助手回答 {index}",
+                "similar_role": "相似角色甲",
+                "similar_response": f"相似角色回答 {index}",
+                "verdict": "pass" if contrast_pass else "fail",
+                "reason": f"第 {index} 条按角色独有立场、关系和句法证据区分。",
+            }
+        )
+        evidence_items.append(
+            {
+                "subject": f"规则或召回映射 {index}",
+                "evidence": f"TESTROLE-{index:04d} 的原始字段和具体观察",
+                "verdict": "pass" if index <= 10 else "fail",
+                "reason": f"逐字段复核第 {index} 条映射是否支持结论。",
+            }
+        )
+        batch_items.append(
+            {
+                "prompt": sample["prompt"],
+                "response": sample["response"],
+                "status": str(batch_output["responses"][index - 1]["status"]),
+                "reason": f"检查器第 {index} 条没有命中退化规则。",
+            }
+        )
+        quality_items.append(
+            {
+                "prompt": sample["prompt"],
+                "response": sample["response"],
+                "verdict": "pass",
+                "reason": f"独立评估第 {index} 条的角色还原、连续性、口语、形态和事实风险。",
+            }
+        )
 
     write_text(
         records_dir / "blind-record-a",
-        "EVAL_RECORD_VERSION=1\nCASE_ID=CASE-18\nEVALUATOR_ID=隔离评测上下文 A\n"
-        "SAMPLE_COUNT=12\nPASS_COUNT=10\n" + items(12) + "\n",
+        "EVAL_RECORD_VERSION=2\nCASE_ID=CASE-18\nEVALUATOR_ID=隔离评测上下文 A\n"
+        "SAMPLE_COUNT=12\nPASS_COUNT=10\n" + json_items(blind_items) + "\n",
     )
     write_text(
         records_dir / "contrast-record-b",
-        "EVAL_RECORD_VERSION=1\nCASE_ID=CASE-19\nEVALUATOR_ID=独立评测 Agent B\n"
-        "SAMPLE_COUNT=10\nPASS_COUNT=8\n" + items(10) + "\n",
+        "EVAL_RECORD_VERSION=2\nCASE_ID=CASE-19\nEVALUATOR_ID=独立评测 Agent B\n"
+        "SAMPLE_COUNT=12\nPASS_COUNT=10\n" + json_items(contrast_items) + "\n",
     )
     write_text(
         records_dir / "evidence-map-record-c",
-        "EVAL_RECORD_VERSION=1\nCASE_ID=CASE-20\nEVALUATOR_ID=隔离证据审计上下文 C\n"
+        "EVAL_RECORD_VERSION=2\nCASE_ID=CASE-20\nEVALUATOR_ID=隔离证据审计上下文 C\n"
         "TRACE_COUNT=6\nTRACE_PASS=6\nRETRIEVAL_PASS=5\nMAPPING_COUNT=12\nMAPPING_PASS=10\n"
-        + items(12) + "\n",
+        + json_items(evidence_items) + "\n",
     )
     write_text(
         records_dir / "batch-response-record-d",
-        "EVAL_RECORD_VERSION=1\nCASE_ID=CASE-23\nSAMPLE_COUNT=10\nCHECK_STATUS=pass\n"
-        + items(10) + "\n",
+        "EVAL_RECORD_VERSION=2\nCASE_ID=CASE-23\nSAMPLE_COUNT=12\nCHECK_STATUS=pass\n"
+        f"INPUT_FILE_SHA256={runtime_hash}\nCHECK_OUTPUT_SHA256={batch_output_hash}\n"
+        + json_items(batch_items) + "\n",
+    )
+    write_text(
+        records_dir / "runtime-quality-record-e",
+        "EVAL_RECORD_VERSION=2\nCASE_ID=CASE-24\nEVALUATOR_ID=独立质量评测 Agent D\n"
+        "SAMPLE_COUNT=12\nTOTAL_SCORE=85\nROLE_FIDELITY_SCORE=35\nCONTINUITY_SCORE=17\n"
+        "ORALITY_SCORE=13\nSHAPE_DIVERSITY_SCORE=12\nFACT_RISK_SCORE=8\n"
+        f"SUBJECT_FILE_SHA256={runtime_hash}\n" + json_items(quality_items) + "\n",
     )
 
     cards = []
@@ -714,6 +897,7 @@ def build_fixture(
 
 """ + "\n".join(bio_entries),
     )
+    bind_evaluation_hash(target)
 
 
 class PersonaToolTests(unittest.TestCase):
@@ -1140,6 +1324,7 @@ class PersonaToolTests(unittest.TestCase):
             library = role / "references" / "06-对白库.md"
             text = library.read_text(encoding="utf-8")
             write_text(library, text.replace("- 原文：原作逐字原句 3", "- 原文：原作逐字原句 2", 1))
+            bind_evaluation_hash(role)
             result = persona_tool.validate_skill(role, "release")
             self.assertTrue(result["valid"], result["issues"])
             self.assertEqual(result["metrics"]["exact_original_cards"], 80)
@@ -1159,6 +1344,7 @@ class PersonaToolTests(unittest.TestCase):
                 "- 来源类型：原作明确", "- 来源类型：可靠转写"
             )
             write_text(source_path, source_text)
+            bind_evaluation_hash(role)
             result = persona_tool.validate_skill(role, "release")
             self.assertTrue(result["valid"], result["issues"])
             self.assertEqual(result["metrics"]["exact_original_cards"], 40)
@@ -1241,6 +1427,7 @@ class PersonaToolTests(unittest.TestCase):
             text = library.read_text(encoding="utf-8").replace("- 原文质量：原声核验", "- 原文质量：原语言文本核验")
             text = text.replace("- 语音表现：原声语速重音观察", "- 语音表现：未核验原声；文本口语观察")
             write_text(library, text)
+            bind_evaluation_hash(role)
             result = persona_tool.validate_skill(role, "release")
             self.assertTrue(result["valid"], result["issues"])
             self.assertEqual(result["metrics"]["performance_verified_cards"], 0)
@@ -1557,6 +1744,7 @@ class PersonaToolTests(unittest.TestCase):
                 source_path,
                 source_path.read_text(encoding="utf-8").replace("- 原始语言：zh-CN", "- 原始语言：ja-JP"),
             )
+            bind_evaluation_hash(role)
             result = persona_tool.validate_skill(role, "release")
             self.assertTrue(result["valid"], result["issues"])
             selected = json.loads(
@@ -1693,8 +1881,8 @@ class PersonaToolTests(unittest.TestCase):
             build_fixture(role, "existing-character", 80, 40, 20)
             cases_path = role / "references" / "07-验证用例.md"
             text = cases_path.read_text(encoding="utf-8")
-            text = text.replace("- 同一回答形状样本数：3", "- 同一回答形状样本数：7", 1)
-            text = text.replace("- 追问收尾样本数：4", "- 追问收尾样本数：8", 1)
+            text = text.replace("- 同一回答形状样本数：0", "- 同一回答形状样本数：7", 1)
+            text = text.replace("- 追问收尾样本数：0", "- 追问收尾样本数：9", 1)
             text = text.replace("- 长度与句数异常集中：否", "- 长度与句数异常集中：是", 1)
             write_text(cases_path, text)
             result = persona_tool.validate_skill(role, "release")
@@ -1811,6 +1999,30 @@ class PersonaToolTests(unittest.TestCase):
                     encoding="utf-8",
                 )
             )
+            mixed_path = role / "tests" / "mixed-responses.json"
+            write_text(
+                mixed_path,
+                json.dumps(
+                    [
+                        "做网站啊，挺好。先别急着铺一大堆页面：它是给谁用的，对方进来第一件事要完成什么？这两个定下来，我们就能做出第一版。",
+                        "不行，这里会丢数据。副本留下。",
+                        "咦，这次居然一下就过了。",
+                        "我刚才看反了，是我的错。",
+                        "还在转呢，再给它一点时间。",
+                        "这个颜色我不喜欢，换掉吧。",
+                        "今天先到这里，剩下的明天再说。",
+                        "三次失败也只是三条线索，不是判决。",
+                    ],
+                    ensure_ascii=False,
+                ),
+            )
+            mixed = json.loads(
+                subprocess.check_output(
+                    [sys.executable, str(checker), "--root", str(role), "--batch-file", str(mixed_path)],
+                    text=True,
+                    encoding="utf-8",
+                )
+            )
             self.assertEqual(generic["status"], "fail")
             self.assertGreaterEqual(generic["ai_tone_score"], 60)
             self.assertEqual(spoken["status"], "pass")
@@ -1829,6 +2041,147 @@ class PersonaToolTests(unittest.TestCase):
             self.assertEqual(uniform["status"], "fail")
             self.assertIn("batch_question_closure_repeated", uniform_codes)
             self.assertIn("batch_response_shape_repeated", uniform_codes)
+            self.assertEqual(mixed["status"], "fail")
+            self.assertIn("batch_individual_failures", {item["code"] for item in mixed["findings"]})
+
+    def test_release_rejects_bare_pass_records_and_stale_runtime_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "forged-test-role"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            blind = role / "tests" / "blind-record-a"
+            write_text(
+                blind,
+                "EVAL_RECORD_VERSION=2\nCASE_ID=CASE-18\nEVALUATOR_ID=隔离评测上下文 A\n"
+                "SAMPLE_COUNT=12\nPASS_COUNT=12\n"
+                + "\n".join(f"ITEM-{index:02d}: pass" for index in range(1, 13))
+                + "\n",
+            )
+            runtime = role / "tests" / "runtime-conversation.json"
+            payload = json.loads(runtime.read_text(encoding="utf-8"))
+            payload[0]["response"] = "这条回答在检查和评估结束后被替换了。"
+            write_text(runtime, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("tests.record_item_not_structured", codes)
+            self.assertIn("tests.batch_output_stale", codes)
+
+    def test_release_rejects_duplicate_evaluation_item_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "duplicate-eval-items"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            record = role / "tests" / "blind-record-a"
+            write_text(
+                record,
+                record.read_text(encoding="utf-8").replace("ITEM-02:", "ITEM-01:", 1),
+            )
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("tests.record_item_ids_invalid", codes)
+
+    def test_release_rejects_evaluation_bound_to_old_persona(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "stale-persona-evaluation"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            core = role / "references" / "01-角色核心.md"
+            write_text(
+                core,
+                core.read_text(encoding="utf-8").replace(
+                    "遇到危险时把人的安全放在规则之前",
+                    "遇到危险时先保护眼前的人再重新判断规则",
+                    1,
+                ),
+            )
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("tests.evaluation_persona_stale", codes)
+
+    def test_release_rejects_broken_runtime_conversation_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "broken-runtime-chain"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            runtime = role / "tests" / "runtime-conversation.json"
+            samples = json.loads(runtime.read_text(encoding="utf-8"))
+            samples[5]["previous_turn"] = 1
+            write_text(runtime, json.dumps(samples, ensure_ascii=False, indent=2) + "\n")
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("tests.runtime_conversation_chain_invalid", codes)
+
+    def test_release_reruns_checker_instead_of_trusting_saved_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "forged-saved-pass"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            runtime = role / "tests" / "runtime-conversation.json"
+            samples = json.loads(runtime.read_text(encoding="utf-8"))
+            for sample in samples:
+                sample["response"] = "先检查当前状态，再确认范围，然后我们继续推进。"
+            write_text(runtime, json.dumps(samples, ensure_ascii=False, indent=2) + "\n")
+            # Keep the previously saved pass output in place.  Release
+            # validation must independently rerun the trusted checker.
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("tests.batch_recheck_failed", codes)
+            self.assertIn("tests.quality_record_stale", codes)
+
+    def test_release_rejects_low_independent_runtime_quality(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "low-quality-role"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            cases = role / "references" / "07-验证用例.md"
+            text = cases.read_text(encoding="utf-8")
+            text = text.replace("- 综合评分：85", "- 综合评分：75", 1)
+            text = text.replace("- 角色还原：35", "- 角色还原：31", 1)
+            text = text.replace("- 口语自然度：13", "- 口语自然度：11", 1)
+            text = text.replace("- 回答形态多样性：12", "- 回答形态多样性：10", 1)
+            text = text.replace("- 事实与风险处理：8", "- 事实与风险处理：6", 1)
+            text = text.replace("- 独立结论：通过", "- 独立结论：未通过", 1)
+            write_text(cases, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("tests.quality_total_low", codes)
+            self.assertIn("tests.quality_role_low", codes)
+            self.assertIn("tests.quality_orality_low", codes)
+            self.assertIn("tests.quality_diversity_low", codes)
+            self.assertIn("tests.quality_fact_risk_low", codes)
+            self.assertIn("tests.quality_verdict_not_passed", codes)
+            gate = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "persona_tool.py"),
+                    "completion-gate",
+                    str(role),
+                    "--activation-status",
+                    "enabled",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertNotEqual(gate.returncode, 0)
+            self.assertIn("TERMINAL_ALLOWED=false", gate.stdout)
+
+    def test_release_rejects_missing_subtitle_downgrade_and_duplicate_audit_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "downgraded-role"
+            build_fixture(role, "existing-character", 40, 15, 10)
+            sources = role / "references" / "08-来源索引.md"
+            text = sources.read_text(encoding="utf-8")
+            old = "- 资料丰度边界说明：检查过更高档目标所需范围，但可核查原始表达规模未达到丰富档"
+            new = "- 资料丰度边界说明：未取得原始字幕文件，因此按一般档验收"
+            text = text.replace(old, new + "\n" + new, 1)
+            write_text(sources, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("research.profile_downgraded_by_missing_medium", codes)
+            self.assertIn("research.duplicate_audit_field", codes)
 
     def test_evidence_mapping_audit_is_independent_and_meets_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

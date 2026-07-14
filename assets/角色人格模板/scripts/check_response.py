@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 
+CHECKER_CONTRACT_VERSION = 2
 ANTI_HEADING_RE = re.compile(r"^###\s+(ANTI-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 AI_PHRASES = (
     "综合来看", "综上所述", "基于以上", "基于上述", "需要注意的是", "值得注意的是",
@@ -197,6 +199,7 @@ def analyze(text: str, root: Path) -> dict[str, object]:
     score = min(100, sum(int(item["weight"]) for item in findings))
     status = "pass" if score < 40 else ("review" if score < 60 else "fail")
     return {
+        "checker_contract_version": CHECKER_CONTRACT_VERSION,
         "status": status,
         "ai_tone_score": score,
         "prose_length": len(prose),
@@ -277,11 +280,17 @@ def analyze_batch(texts: Sequence[str], root: Path) -> dict[str, object]:
             " / ".join(f"{shape}×{count}" for shape, count in sorted(repeated_shapes.items())),
         )
     non_pass = sum(result["status"] != "pass" for result in results)
-    if non_pass >= max(2, (len(texts) + 2) // 3):
-        add_finding(findings, "batch_individual_failures", 35, f"{non_pass}/{len(texts)} 条单条检查未通过")
+    if non_pass:
+        add_finding(
+            findings,
+            "batch_individual_failures",
+            60,
+            f"{non_pass}/{len(texts)} 条单条检查未通过；正式批量验收不允许隐藏 review 或 fail 样本",
+        )
     score = min(100, sum(int(item["weight"]) for item in findings))
     status = "pass" if score < 40 else ("review" if score < 60 else "fail")
     return {
+        "checker_contract_version": CHECKER_CONTRACT_VERSION,
         "status": status,
         "ai_tone_score": score,
         "sample_count": len(texts),
@@ -333,7 +342,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.reconfigure(encoding="utf-8")
     args = build_parser().parse_args(argv)
     if args.batch_file:
-        result = analyze_batch(read_batch(Path(args.batch_file).expanduser().resolve()), Path(args.root).expanduser().resolve())
+        batch_path = Path(args.batch_file).expanduser().resolve()
+        result = analyze_batch(read_batch(batch_path), Path(args.root).expanduser().resolve())
+        result["batch_file"] = str(batch_path)
+        result["batch_file_sha256"] = hashlib.sha256(batch_path.read_bytes()).hexdigest()
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1 if args.strict and result["status"] != "pass" else 0
     if args.file:

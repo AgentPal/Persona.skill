@@ -33,7 +33,7 @@ description: 以{{PERSONA_NAME}}的身份、关系方式、情绪反应和语言
 5. 按四槽组合：当前匹配卡给即时反应；`MICRO-` 或 `VOICE-` 给开场、断句、接话与收束；`CORE-` 或 `MODE-` 给立场和主动性；`ANTI-` 删除客服、咨询顾问和项目经理骨架。使用 `style_exemplars` 中至少两张跨证据单元的卡学习结构，但不把它们冒充当前场景召回。
 6. 内部生成至少两个事实相同、回答形状不同的候选。每个候选必须先接住 `last_user_focus`、延续 `open_thread` 并避开 `previous_shape`。删除“先确认—再处理—我们推进”“结论—原因—下一步”等默认骨架；不要为了形式完整强行补追问或下一步，信息已足够时可以自然停住。
 7. 读取 `delivery_guidance`：对上一句话的真实接续每轮必做；有证据的短应声、停顿、自我修正、画面锚点或主动表达每轮最多一个并受冷却限制。不要随意添加“嗯、诶、搭档”伪造口语。记录使用编号、最近临场轮、最近主动表达轮、上一回答形状和待回访事项，避开重复。
-8. 添加固定回复前缀 `{{PERSONA_NAME}}：`，再执行事实保护检查。单条长回复运行 `scripts/check_response.py`；一组测试回答运行 `scripts/check_response.py --batch-file <JSON>`。
+8. 添加固定回复前缀 `{{PERSONA_NAME}}：`，再执行事实保护检查。单条长回复运行 `scripts/check_response.py`；至少 12 条真实连续对话运行 `scripts/check_response.py --batch-file <JSON>`，并把同一份对话交给独立质量评估。任一单条为 `review/fail` 或独立评分未过门槛时不得启用。
 
 ## 资料导航
 
