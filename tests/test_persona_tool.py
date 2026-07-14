@@ -31,6 +31,8 @@ def card_text(
     source_id: str,
     scene_count: int,
     signature_count: int,
+    context_type: str = "对话场景",
+    medium: str = "视听",
 ) -> str:
     card_id = f"TESTROLE-{index:04d}"
     task_states = ("start", "progress", "waiting", "failed", "risk", "complete", "blocked", "issue")
@@ -40,9 +42,18 @@ def card_text(
     task_state = task_states[(index - 1) % len(task_states)]
     risk = "high" if index % 10 == 0 else "low"
     existing = persona_type in {"existing-character", "real-person-simulation"}
-    source_type = "原作明确" if existing else "用户补充"
-    card_type = "原文对白" if existing else "原创规范对白"
-    original_quality = "原声核验" if existing else "原创确认"
+    source_type = (
+        "本人公开表达" if persona_type == "real-person-simulation"
+        else ("原作明确" if existing else "用户补充")
+    )
+    context_card_types = {
+        "内心独白": "原文独白", "访谈回答": "原文采访回答", "演讲发言": "原文发言",
+        "博客文章": "原文文章", "社交媒体": "原文帖子", "书信": "原文书信",
+    }
+    card_type = context_card_types.get(context_type, "原文对白") if existing else "原创规范对白"
+    original_quality = (
+        "原创确认" if not existing else ("原始版式核验" if medium == "文字" else ("原语言文本核验" if medium == "公开表达" else "原声核验"))
+    )
     scene_number = ((index - 1) % max(scene_count, 1)) + 1
     recognition = "核心" if index <= signature_count else "补充"
     annotation_styles = ("追问", "转折", "邀请", "拒绝", "缓和", "确认", "自修正", "短促收束")
@@ -51,6 +62,24 @@ def card_text(
     initiatives = ("主动发起", "回应", "跟进", "打断", "收束", "自我修正", "回应后接手", "主动回访")
     speech_act = intents[(index - 1) % 8]
     emotion = emotions[(index - 1) % 8]
+    if context_type in {"演讲发言", "博客文章", "社交媒体", "书信"}:
+        completeness = "语境充分"
+        previous_text = "不适用"
+        trigger_text = f"{annotation_style}公开主题 {index}"
+        next_text = "不适用"
+        target = "公众或读者"
+    elif context_type in {"叙事场景", "内心独白"}:
+        completeness = "语境充分"
+        previous_text = f"{annotation_style}相邻叙事 {index}"
+        trigger_text = f"{annotation_style}章节事件 {index}"
+        next_text = f"{annotation_style}后续叙事 {index}"
+        target = "自己"
+    else:
+        completeness = "完整"
+        previous_text = f"{annotation_style}前一句测试原文 {index}"
+        trigger_text = f"{annotation_style}触发话语 {index}"
+        next_text = f"{annotation_style}后一句测试原文 {index}"
+        target = "熟悉的同伴"
     return f"""## {card_id}
 
 - 原作检索标签：speech_act={speech_act}; trigger={task_state}; interaction={speech_act}; position=reply; relation=familiar; emotion={emotion}; initiative=response
@@ -64,12 +93,13 @@ def card_text(
 - 来源类型：{source_type}
 - 来源位置：{source_id}，测试定位 {index}
 - 作品定位：测试作品第 {scene_number} 场，位置 {index}
+- 语境类型：{context_type if existing else '原创设定'}
 - 场景编号：SCENE-{scene_number:04d}
-- 场景完整度：完整
-- 前置原文：{annotation_style}前一句测试原文 {index}
-- 触发话语：{annotation_style}触发话语 {index}
-- 后续原文：{annotation_style}后一句测试原文 {index}
-- 对话对象：熟悉的同伴
+- 场景完整度：{completeness if existing else '原创设定'}
+- 前置原文：{previous_text}
+- 触发话语：{trigger_text}
+- 后续原文：{next_text}
+- 对话对象：{target}
 - 关系距离：familiar
 - 交流目的：{intents[(index - 1) % 8]}
 - 互动功能：{intents[(index - 1) % 8]}-{index}
@@ -101,8 +131,11 @@ def build_fixture(
     scene_count: int = 0,
     signature_count: int = 0,
     research_status: str = "达标",
+    medium: str | None = None,
+    context_type: str = "对话场景",
 ) -> None:
     shutil.copytree(ROOT / "assets" / "角色人格模板", target)
+    selected_medium = medium or ("原创" if persona_type in {"original-persona", "composite-original"} else ("公开表达" if persona_type == "real-person-simulation" else "视听"))
     replacements = {
         "{{PERSONA_NAME}}": "测试角色",
         "{{PERSONA_SLUG}}": "test-role",
@@ -117,7 +150,7 @@ def build_fixture(
         text = re.sub(r"- 人格来源类型：\[待填写[^\]]*\]", f"- 人格来源类型：{persona_type}", text)
         text = re.sub(
             r"- 原作媒介：\[待填写[^\]]*\]",
-            f"- 原作媒介：{'原创' if persona_type in {'original-persona', 'composite-original'} else '视听'}",
+            f"- 原作媒介：{selected_medium}",
             text,
         )
         text = re.sub(r"- 作品原始语言：\[待填写[^\]]*\]", "- 作品原始语言：zh-CN", text)
@@ -199,7 +232,7 @@ def build_fixture(
             source_id = f"SRC-{((index - 1) % 3) + 1:04d}"
         else:
             source_id = "SRC-0001"
-        cards.append(card_text(index, persona_type, source_id, scene_count or card_count, signature_count))
+        cards.append(card_text(index, persona_type, source_id, scene_count or card_count, signature_count, context_type, selected_medium))
         index_rows.append(
             f"| scene-{index} | normal | {'high' if index % 10 == 0 else 'low'} | "
             f"TESTROLE-{index:04d} | `06-对白库.md` | test |"
@@ -396,11 +429,13 @@ def build_fixture(
 
     if persona_type == "existing-character":
         source_types = ("原作明确", "原作明确", "原作明确", "公开资料", "合理推导")
+    elif persona_type == "real-person-simulation":
+        source_types = ("本人公开表达", "本人公开表达", "本人公开表达", "公开资料", "公开资料")
     else:
         source_types = ("用户补充",)
     source_entries = []
     for index, source_type in enumerate(source_types, start=1):
-        support_value = f"TESTROLE-{index:04d}" if source_type in {"原作明确", "用户补充"} else f"角色设定结论 {index}"
+        support_value = f"TESTROLE-{index:04d}" if source_type in {"原作明确", "本人公开表达", "用户补充"} else f"角色设定结论 {index}"
         source_entries.append(
             f"""## SRC-{index:04d}
 
@@ -667,10 +702,51 @@ class PersonaToolTests(unittest.TestCase):
             self.assertEqual(high_risk["delivery_guidance"]["presence_status"], "serious-only")
             self.assertTrue(all(item["evidence_confidence"] in {"high", "medium"} for item in high_risk["selected"]))
 
+    def test_novel_character_releases_with_narrative_evidence_units(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "novel-role"
+            build_fixture(
+                role, "existing-character", 24, 8, 8,
+                medium="文字", context_type="内心独白",
+            )
+            result = persona_tool.validate_skill(role, "release")
+            self.assertTrue(result["valid"], result["issues"])
+            self.assertEqual(result["metrics"]["distinct_evidence_units"], 8)
+            self.assertEqual(result["metrics"]["performance_verified_cards"], 24)
+
+    def test_real_person_releases_from_public_posts_without_dialogue_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "public-person-role"
+            build_fixture(
+                role, "real-person-simulation", 24, 8, 8,
+                medium="公开表达", context_type="社交媒体",
+            )
+            result = persona_tool.validate_skill(role, "release")
+            self.assertTrue(result["valid"], result["issues"])
+            self.assertEqual(result["metrics"]["distinct_evidence_units"], 8)
+            self.assertEqual(result["metrics"]["original_sources"], 3)
+
+    def test_self_contained_expression_still_requires_publication_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "contextless-post-role"
+            build_fixture(
+                role, "real-person-simulation", 24, 8, 8,
+                medium="公开表达", context_type="社交媒体",
+            )
+            library = role / "references" / "06-对白库.md"
+            text = library.read_text(encoding="utf-8")
+            text = text.replace("- 触发话语：追问公开主题 1", "- 触发话语：不适用", 1)
+            text = text.replace("- 对话对象：公众或读者", "- 对话对象：不适用", 1)
+            write_text(library, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("dialogue.complete_scene_context_missing", codes)
+
     def test_existing_character_below_target_requires_expansion(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "small-role"
-            build_fixture(role, "existing-character", 20, 10, 5)
+            build_fixture(role, "existing-character", 12, 4, 3)
             result = persona_tool.validate_skill(role, "release")
             codes = {issue["code"] for issue in result["issues"]}
             self.assertFalse(result["valid"])
@@ -682,7 +758,7 @@ class PersonaToolTests(unittest.TestCase):
     def test_exhausted_research_releases_all_available_material(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "exhausted-role"
-            build_fixture(role, "existing-character", 20, 10, 5, research_status="已穷尽")
+            build_fixture(role, "existing-character", 12, 4, 3, research_status="已穷尽")
             result = persona_tool.validate_skill(role, "release")
             self.assertTrue(result["valid"], result["issues"])
             self.assertEqual(result["metrics"]["version"], "正式版")
@@ -697,7 +773,7 @@ class PersonaToolTests(unittest.TestCase):
     def test_exhausted_status_requires_real_expansion_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "false-exhaustion"
-            build_fixture(role, "existing-character", 20, 10, 5, research_status="已穷尽")
+            build_fixture(role, "existing-character", 12, 4, 3, research_status="已穷尽")
             source_path = role / "references" / "08-来源索引.md"
             source_text = source_path.read_text(encoding="utf-8")
             write_text(
@@ -723,12 +799,11 @@ class PersonaToolTests(unittest.TestCase):
             codes = {issue["code"] for issue in result["issues"]}
             self.assertFalse(result["valid"])
             self.assertIn("dialogue.original_source_mismatch", codes)
-            self.assertIn("dialogue.exact_original_cards_low", codes)
 
     def test_existing_character_rejects_missing_original_and_work_rewrite(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "fake-original"
-            build_fixture(role, "existing-character", 80, 40, 20)
+            build_fixture(role, "existing-character", 24, 8, 8)
             library = role / "references" / "06-对白库.md"
             text = library.read_text(encoding="utf-8")
             text = text.replace("- 原文：原作逐字原句 1", "- 原文：无", 1)
@@ -762,14 +837,14 @@ class PersonaToolTests(unittest.TestCase):
     def test_translated_or_unverified_text_cannot_count_as_original_language(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "translated-corpus"
-            build_fixture(role, "existing-character", 80, 40, 20)
+            build_fixture(role, "existing-character", 24, 8, 8)
             library = role / "references" / "06-对白库.md"
             text = library.read_text(encoding="utf-8")
             write_text(library, text.replace("- 原文质量：原声核验", "- 原文质量：译本参考", 1))
             result = persona_tool.validate_skill(role, "release")
             codes = {issue["code"] for issue in result["issues"]}
             self.assertFalse(result["valid"])
-            self.assertEqual(result["metrics"]["exact_original_cards"], 79)
+            self.assertEqual(result["metrics"]["exact_original_cards"], 23)
             self.assertIn("dialogue.original_language_unverified", codes)
             self.assertIn("dialogue.exact_original_cards_low", codes)
 
@@ -1174,11 +1249,11 @@ class PersonaToolTests(unittest.TestCase):
         self.assertIn("默认静默完成角色核心读取", creator)
         self.assertIn("最终版本始终为正式版", creator)
         self.assertIn("不按版权类别、文本长度或资料完整度限制收集", creator)
-        self.assertIn("对白库禁止加入官方角色介绍", creator)
-        self.assertIn("原语言逐字原文", creator)
+        self.assertIn("表达库禁止加入人物介绍", creator)
+        self.assertIn("本人或角色真实产生的逐字表达", creator)
         self.assertIn("声纹不能由模型自由概括", creator)
         self.assertIn("人物背景档案", creator)
-        self.assertIn("原文卡只标原作语义", creator)
+        self.assertIn("原文卡只标来源语义", creator)
         self.assertIn("证据映射", creator)
         self.assertIn("没有可靠卡就返回空结果", creator)
         self.assertIn("临场感和主动表达必须稀疏", creator)

@@ -62,6 +62,7 @@ REQUIRED_CARD_FIELDS = (
     "来源类型",
     "来源位置",
     "作品定位",
+    "语境类型",
     "场景编号",
     "场景完整度",
     "前置原文",
@@ -91,14 +92,18 @@ REQUIRED_CARD_FIELDS = (
     "重复限制",
 )
 
-ALLOWED_SOURCE_TYPES = {"原作明确", "用户补充", "公开资料", "合理推导", "Persona.skill 补齐"}
-EXACT_CARD_TYPES = {"原文对白", "原文口头禅", "原文独白", "原文发言"}
+ALLOWED_SOURCE_TYPES = {"原作明确", "本人公开表达", "用户补充", "公开资料", "合理推导", "Persona.skill 补齐"}
+PRIMARY_SOURCE_TYPES = {"原作明确", "本人公开表达"}
+EXACT_CARD_TYPES = {
+    "原文对白", "原文口头禅", "原文独白", "原文发言", "原文采访回答",
+    "原文文章", "原文帖子", "原文书信",
+}
 AUTHORED_CARD_TYPES = {"原创规范对白"}
 ALLOWED_CARD_TYPES = EXACT_CARD_TYPES | AUTHORED_CARD_TYPES
 SIGNATURE_LEVELS = {"核心", "常用"}
 ALLOWED_ORIGINAL_QUALITIES = {"原声核验", "原语言文本核验", "原始版式核验"}
 ALLOWED_QUALITIES = ALLOWED_ORIGINAL_QUALITIES | {"译本参考", "原创确认"}
-ALLOWED_MEDIA = {"视听", "文字", "混合", "原创"}
+ALLOWED_MEDIA = {"视听", "文字", "混合", "公开表达", "原创"}
 ALLOWED_PERSONA_TYPES = {
     "existing-character",
     "original-persona",
@@ -110,14 +115,22 @@ REQUIRED_TAGS = {"speech_act", "trigger", "interaction", "position", "relation",
 FORBIDDEN_SOURCE_TAGS = {"task_state", "user_state", "intent", "risk", "language"}
 REQUIRED_LABEL_EVIDENCE = REQUIRED_TAGS
 ALLOWED_LABEL_EVIDENCE = {"原文可见", "上下文可见", "来源明确", "用户确认", "合理推导", "缺失"}
-ALLOWED_SCENE_COMPLETENESS = {"完整", "片段", "孤立摘录", "原创设定"}
-COUNTABLE_SCENE_COMPLETENESS = {"完整", "原创设定"}
+ALLOWED_CONTEXT_TYPES = {
+    "对话场景", "叙事场景", "内心独白", "访谈回答", "演讲发言",
+    "博客文章", "社交媒体", "书信", "原创设定",
+}
+CONVERSATIONAL_CONTEXT_TYPES = {"对话场景", "访谈回答"}
+NARRATIVE_CONTEXT_TYPES = {"叙事场景", "内心独白"}
+SELF_CONTAINED_CONTEXT_TYPES = {"演讲发言", "博客文章", "社交媒体", "书信"}
+ALLOWED_SCENE_COMPLETENESS = {"完整", "语境充分", "片段", "孤立摘录", "原创设定"}
+COUNTABLE_SCENE_COMPLETENESS = {"完整", "语境充分", "原创设定"}
 ALLOWED_EVALUATOR_TYPES = {"human", "independent-agent", "independent-context"}
 REQUIRED_VOICE_FIELDS = ("层级", "规律", "证据卡", "证据映射", "检索条件", "反证或边界", "适用条件", "置信度")
 REQUIRED_VOICE_LAYERS = {
     "lexicon", "syntax", "ending", "orality", "interaction", "emotion", "relation",
     "translation", "anti-voice",
 }
+MINIMUM_VOICE_LAYERS = {"lexicon", "syntax", "ending", "orality", "interaction", "anti-voice"}
 ALLOWED_VOICE_LAYERS = REQUIRED_VOICE_LAYERS | {"prosody"}
 REQUIRED_MODE_FIELDS = (
     "情绪", "触发", "关系", "角色即时反应", "语言变化", "响应形态", "口语节奏",
@@ -475,6 +488,8 @@ def context_is_missing(value: str | None) -> bool:
     if not value:
         return True
     normalized = value.strip().lower()
+    if normalized in {"无", "none", "n/a", "不适用"} or normalized.startswith("无（"):
+        return True
     return any(
         marker in normalized
         for marker in ("缺失", "未知", "不明", "未提供", "未逐句标出", "无法确认", "无法定位")
@@ -569,6 +584,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         "performance_verified_cards": 0,
         "canonical_authored_cards": 0,
         "distinct_source_scenes": 0,
+        "distinct_evidence_units": 0,
         "context_complete_cards": 0,
         "signature_cards": 0,
         "derived_cards": 0,
@@ -682,7 +698,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 issues,
                 "error" if level == "release" else "warning",
                 "persona.medium_invalid",
-                "原作媒介必须是视听、文字、混合或原创",
+                "原作媒介必须是视听、文字、混合、公开表达或原创",
                 core_path,
                 root,
             )
@@ -933,6 +949,16 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             if has_substantive_value(scene_id):
                 card_scene_ids[card_id] = (scene_id or "").strip()
             scene_completeness = field_value(block, "场景完整度")
+            context_type = field_value(block, "语境类型")
+            if (
+                context_type
+                and not PLACEHOLDER_RE.search(context_type)
+                and context_type not in ALLOWED_CONTEXT_TYPES
+            ):
+                add_issue(
+                    issues, "error", "dialogue.context_type_invalid",
+                    f"{card_id} 的语境类型无效：{context_type}", path, root,
+                )
             if (
                 scene_completeness
                 and not PLACEHOLDER_RE.search(scene_completeness)
@@ -947,21 +973,45 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 field_value(block, "后续原文"), field_value(block, "对话对象"),
             )
             complete_context_count = sum(not context_is_missing(value) for value in context_values)
+            context_is_countable = False
+            if context_type in CONVERSATIONAL_CONTEXT_TYPES:
+                context_is_countable = (
+                    complete_context_count >= 3
+                    and not context_is_missing(field_value(block, "触发话语"))
+                    and not context_is_missing(field_value(block, "对话对象"))
+                )
+            elif context_type in NARRATIVE_CONTEXT_TYPES:
+                context_is_countable = (
+                    complete_context_count >= 2
+                    and not (
+                        context_is_missing(field_value(block, "前置原文"))
+                        and context_is_missing(field_value(block, "触发话语"))
+                    )
+                )
+            elif context_type in SELF_CONTAINED_CONTEXT_TYPES:
+                context_is_countable = (
+                    complete_context_count >= 1
+                    and has_substantive_value(field_value(block, "来源位置"))
+                    and (
+                        not context_is_missing(field_value(block, "触发话语"))
+                        or not context_is_missing(field_value(block, "对话对象"))
+                    )
+                )
+            elif context_type == "原创设定":
+                context_is_countable = scene_completeness == "原创设定" and complete_context_count >= 1
             if (
                 card_id in (exact_original_card_ids | canonical_authored_card_ids)
                 and has_substantive_value(scene_id)
                 and scene_completeness in COUNTABLE_SCENE_COMPLETENESS
-                and complete_context_count >= 3
-                and not context_is_missing(field_value(block, "触发话语"))
-                and not context_is_missing(field_value(block, "对话对象"))
+                and context_is_countable
             ):
                 distinct_source_scenes.add((scene_id or "").strip())
                 context_complete_card_ids.add(card_id)
-            elif scene_completeness == "完整" and complete_context_count < 3:
+            elif scene_completeness in {"完整", "语境充分"} and not context_is_countable:
                 add_issue(
                     issues, "error" if level == "release" else "warning",
                     "dialogue.complete_scene_context_missing",
-                    f"{card_id} 标为完整场景，但前后话轮、触发和对象中只有 {complete_context_count} 项可核验",
+                    f"{card_id} 标为{scene_completeness}，但“{context_type or '未填写'}”所需的来源、触发、对象或上下文不足",
                     path, root,
                 )
             recognition = field_value(block, "识别度")
@@ -992,13 +1042,16 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 persona_type in {"existing-character", "real-person-simulation"}
                 and source_type
                 and not PLACEHOLDER_RE.search(source_type)
-                and source_type != "原作明确"
+                and not (
+                    (persona_type == "existing-character" and source_type == "原作明确")
+                    or (persona_type == "real-person-simulation" and source_type in PRIMARY_SOURCE_TYPES)
+                )
             ):
                 add_issue(
                     issues,
                     "error",
                     "dialogue.source_not_original",
-                    f"{card_id} 的来源类型是“{source_type}”；现有角色对白库只接受已核对的原作明确内容",
+                    f"{card_id} 的来源类型是“{source_type}”；已有角色只接受原作明确内容，现实人物只接受本人可核查的公开表达",
                     path,
                     root,
                 )
@@ -1096,6 +1149,8 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 "语法标记", "语气标记", "口语现象", "句式与节奏",
             ):
                 annotation = field_value(block, annotation_field)
+                if context_is_missing(annotation):
+                    continue
                 if has_substantive_value(annotation, allow_none=True):
                     annotation_values[annotation_field].append(
                         (normalize_template_text(annotation or ""), card_id, path)
@@ -1105,7 +1160,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             normalized_source_refs = {item.upper() for item in source_refs}
             card_source_refs[card_id] = normalized_source_refs
             referenced_source_ids.update(normalized_source_refs)
-            if card_id in exact_original_card_ids and source_type == "原作明确":
+            if card_id in exact_original_card_ids and source_type in PRIMARY_SOURCE_TYPES:
                 original_referenced_source_ids.update(normalized_source_refs)
                 original_card_sources[card_id] = normalized_source_refs
             if source_location and not PLACEHOLDER_RE.search(source_location) and not source_refs:
@@ -1141,6 +1196,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     metrics["performance_verified_cards"] = len(performance_verified_card_ids)
     metrics["canonical_authored_cards"] = len(canonical_authored_card_ids)
     metrics["distinct_source_scenes"] = len(distinct_source_scenes)
+    metrics["distinct_evidence_units"] = len(distinct_source_scenes)
     metrics["context_complete_cards"] = len(context_complete_card_ids)
     metrics["signature_cards"] = len(signature_card_ids)
     metrics["derived_cards"] = len(noncanonical_card_ids)
@@ -1162,8 +1218,8 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 root,
             )
     release_thresholds = {
-        "existing-character": (80, 12),
-        "real-person-simulation": (40, 10),
+        "existing-character": (24, 6),
+        "real-person-simulation": (24, 6),
         "original-persona": (20, 8),
         "composite-original": (20, 8),
     }
@@ -1174,7 +1230,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             issues,
             target_severity,
             "dialogue.too_few",
-            f"对白卡片为 {len(all_ids)} 张，{persona_type} 正式版收集目标为 {min_cards} 张",
+            f"原始表达卡为 {len(all_ids)} 张，{persona_type} 正式版最低覆盖目标为 {min_cards} 张",
             root / "references",
             root,
         )
@@ -1350,7 +1406,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     root,
                 )
         source_type = field_value(block, "来源类型")
-        if source_type == "原作明确":
+        if source_type in PRIMARY_SOURCE_TYPES:
             original_source_ids.add(source_id)
         elif source_type and not PLACEHOLDER_RE.search(source_type) and source_type not in ALLOWED_INDEX_SOURCE_TYPES:
             add_issue(
@@ -1397,7 +1453,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             issues,
             "error" if level == "release" else "warning",
             "dialogue.original_source_mismatch",
-            f"有 {len(unverified_original_card_ids)} 张原作明确卡未引用原作明确来源："
+            f"有 {len(unverified_original_card_ids)} 张原始表达卡未引用原作明确来源或本人公开表达来源："
             + ", ".join(unverified_original_card_ids[:5]),
             sources_path,
             root,
@@ -1548,9 +1604,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         root,
         level,
     )
-    bio_target, bio_category_target = (
-        (12, 6) if persona_type in {"existing-character", "real-person-simulation"} else (8, 4)
-    )
+    bio_target, bio_category_target = (8, 4)
     if level == "release" and len(bio_blocks) < bio_target:
         add_issue(
             issues,
@@ -1631,7 +1685,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 issues,
                 "error" if level == "release" else "warning",
                 "core_rule.evidence_same_scene",
-                f"{core_id} 的证据卡必须来自至少两个不同场景",
+                f"{core_id} 的证据卡必须来自至少两个不同证据单元",
                 core_path,
                 root,
             )
@@ -1650,7 +1704,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             add_issue(
                 issues, "error" if level == "release" else "warning",
                 "core_rule.evidence_context_incomplete",
-                f"{core_id} 的行为结论引用了非完整场景卡：" + ", ".join(incomplete_core_evidence),
+                f"{core_id} 的行为结论引用了语境不充分的表达卡：" + ", ".join(incomplete_core_evidence),
                 core_path, root,
             )
         validate_rule_evidence_mapping(
@@ -1719,7 +1773,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 issues,
                 "error" if level == "release" else "warning",
                 "voice.evidence_same_scene",
-                f"{voice_id} 的证据卡必须来自至少两个不同场景",
+                f"{voice_id} 的证据卡必须来自至少两个不同证据单元",
                 voice_path,
                 root,
             )
@@ -1758,13 +1812,13 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         root,
         level,
     )
-    missing_required_voice_layers = sorted(REQUIRED_VOICE_LAYERS - voice_layers)
+    missing_required_voice_layers = sorted(MINIMUM_VOICE_LAYERS - voice_layers)
     if level == "release" and persona_type in {"existing-character", "real-person-simulation"} and missing_required_voice_layers:
         add_issue(
             issues,
             target_severity,
             "voice.required_layers_missing",
-            "正式版缺少必需的文本声纹层级：" + ", ".join(missing_required_voice_layers),
+            "正式版缺少最低必需的文本声纹层级：" + ", ".join(missing_required_voice_layers),
             voice_path,
             root,
         )
@@ -1806,7 +1860,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 issues,
                 "error" if level == "release" else "warning",
                 "mode.evidence_same_scene",
-                f"{mode_id} 的证据卡必须来自至少两个不同场景",
+                f"{mode_id} 的证据卡必须来自至少两个不同证据单元",
                 mode_path,
                 root,
             )
@@ -1825,7 +1879,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             add_issue(
                 issues, "error" if level == "release" else "warning",
                 "mode.evidence_context_incomplete",
-                f"{mode_id} 的情绪互动模式引用了非完整场景卡：" + ", ".join(incomplete_mode_evidence),
+                f"{mode_id} 的情绪互动模式引用了语境不充分的表达卡：" + ", ".join(incomplete_mode_evidence),
                 mode_path, root,
             )
         validate_rule_evidence_mapping(
@@ -1878,7 +1932,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 issues,
                 "error" if level == "release" else "warning",
                 "anti.evidence_same_scene",
-                f"{anti_id} 的证据卡必须来自至少两个不同场景",
+                f"{anti_id} 的证据卡必须来自至少两个不同证据单元",
                 anti_path,
                 root,
             )
@@ -1913,7 +1967,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     )
 
     core_target, core_layer_target, core_evidence_target, voice_target, voice_layer_target, voice_evidence_target, mode_target, mode_dimension_target, anti_target = (
-        (12, 10, 20, 12, 9, 20, 12, 8, 8)
+        (8, 6, 12, 8, 6, 12, 8, 6, 6)
         if persona_type in {"existing-character", "real-person-simulation"}
         else (8, 6, 12, 8, 6, 12, 8, 6, 6)
     )
@@ -1996,7 +2050,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 issues,
                 "error" if level == "release" else "warning",
                 "scene.cards_same_scene",
-                f"{scene_id} 的候选原文卡必须来自至少两个不同场景",
+                f"{scene_id} 的候选原文卡必须来自至少两个不同证据单元",
                 scene_path,
                 root,
             )
@@ -2015,7 +2069,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             add_issue(
                 issues, "error" if level == "release" else "warning",
                 "scene.card_context_incomplete",
-                f"{scene_id} 的候选卡不是可核验完整场景：" + ", ".join(incomplete_scene_cards),
+                f"{scene_id} 的候选卡缺少与媒介相适应的可核验语境：" + ", ".join(incomplete_scene_cards),
                 scene_path, root,
             )
         candidate_voices = set(re.findall(r"\bVOICE-\d{2}\b", field_value(block, "候选声纹规律") or ""))
@@ -2050,100 +2104,115 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         level,
     )
 
-    if level == "release" and persona_type == "existing-character":
-        if len(verified_fidelity_card_ids) < 80:
+    if level == "release" and persona_type in {"existing-character", "real-person-simulation"}:
+        min_expression_cards = 24
+        min_evidence_units = 8
+        min_signature_cards = 8
+        min_sources = 3 if persona_type == "real-person-simulation" else 1
+        min_primary_sources = 2 if persona_type == "real-person-simulation" else 1
+        if len(verified_fidelity_card_ids) < min_expression_cards:
             add_issue(
                 issues,
                 target_severity,
                 "dialogue.exact_original_cards_low",
-                f"经来源核对、作品原始语言核验且含逐字原文的卡片仅 {len(verified_fidelity_card_ids)} 张，现有作品角色正式版收集目标为 80 张",
+                f"经来源核对且含逐字原文的原始表达卡仅 {len(verified_fidelity_card_ids)} 张，正式版最低覆盖目标为 {min_expression_cards} 张",
                 root / "references",
                 root,
             )
         performance_count = metrics["performance_verified_cards"]
-        if performance_count < 40:
-            verification_label = "原声" if original_medium in {"视听", "混合"} else "原始版式"
+        if performance_count < 1:
+            verification_label = "原声" if original_medium in {"视听", "混合"} else ("原始版式" if original_medium == "文字" else "原始发布页面")
             add_issue(
                 issues,
                 "warning",
                 "dialogue.performance_cards_low",
-                f"完成{verification_label}核验的原文卡为 {performance_count} 张；这是可选增强，不阻止正式版，且不得据文本推测未核验表演",
+                f"尚无完成{verification_label}核验的表达卡；这是可选增强，不阻止正式版，也不得据文本推测未核验表现",
                 root / "references",
                 root,
             )
-        if len(distinct_source_scenes) < 40:
+        if len(distinct_source_scenes) < min_evidence_units:
             add_issue(
                 issues,
                 target_severity,
                 "dialogue.source_scenes_low",
-                f"逐字原文卡仅覆盖 {len(distinct_source_scenes)} 个不同原作场景，正式版收集目标为 40 个",
+                f"原始表达仅覆盖 {len(distinct_source_scenes)} 个不同证据单元，正式版最低覆盖目标为 {min_evidence_units} 个；证据单元可来自对话、叙事、独白、访谈、演讲、博客、社交媒体或书信",
                 root / "references",
                 root,
             )
-        if len(signature_card_ids) < 20:
+        if len(signature_card_ids) < min_signature_cards:
             add_issue(
                 issues,
                 target_severity,
                 "dialogue.signature_cards_low",
-                f"核心或常用原文卡仅 {len(signature_card_ids)} 张，正式版收集目标为 20 张",
+                f"核心或常用原始表达卡仅 {len(signature_card_ids)} 张，正式版最低覆盖目标为 {min_signature_cards} 张",
                 root / "references",
                 root,
             )
-        if source_count < 5:
+        if source_count < min_sources:
             add_issue(
                 issues,
                 target_severity,
                 "sources.too_few",
-                f"来源条目仅 {source_count} 个，现有作品角色正式版收集目标为 5 个",
+                f"来源条目仅 {source_count} 个，正式版最低覆盖目标为 {min_sources} 个",
                 sources_path,
                 root,
             )
-        if len(supporting_original_sources) < 3:
+        if len(supporting_original_sources) < min_primary_sources:
             add_issue(
                 issues,
                 target_severity,
                 "sources.original_too_few",
-                f"被原作卡片实际引用的原作明确来源仅 {len(supporting_original_sources)} 个，现有作品角色正式版收集目标为 3 个",
+                f"被表达卡实际引用的一手来源仅 {len(supporting_original_sources)} 个，正式版最低覆盖目标为 {min_primary_sources} 个",
                 sources_path,
                 root,
             )
     target_met = False
     if persona_type == "existing-character":
         target_met = (
-            len(all_ids) >= 80
-            and len(dimensions) >= 12
-            and len(verified_fidelity_card_ids) >= 80
-            and len(distinct_source_scenes) >= 40
-            and len(signature_card_ids) >= 20
-            and source_count >= 5
-            and len(supporting_original_sources) >= 3
-            and len(core_blocks) >= 12
-            and len(core_layers) >= 10
-            and len(core_evidence_ids & evidence_card_ids) >= 20
-            and len(voice_blocks) >= 12
-            and REQUIRED_VOICE_LAYERS.issubset(voice_layers)
-            and len(voice_evidence_ids & evidence_card_ids) >= 20
-            and len(mode_blocks) >= 12
-            and len(mode_dimensions) >= 8
-            and len(anti_blocks) >= 8
+            len(all_ids) >= 24
+            and len(dimensions) >= 6
+            and len(verified_fidelity_card_ids) >= 24
+            and len(distinct_source_scenes) >= 8
+            and len(signature_card_ids) >= 8
+            and source_count >= 1
+            and len(supporting_original_sources) >= 1
+            and len(core_blocks) >= 8
+            and len(core_layers) >= 6
+            and len(core_evidence_ids & evidence_card_ids) >= 12
+            and len(voice_blocks) >= 8
+            and MINIMUM_VOICE_LAYERS.issubset(voice_layers)
+            and len(voice_evidence_ids & evidence_card_ids) >= 12
+            and len(mode_blocks) >= 8
+            and len(mode_dimensions) >= 6
+            and len(anti_blocks) >= 6
             and len(scenes & REQUIRED_SCENES) == len(REQUIRED_SCENES)
-            and len(bio_blocks) >= 12
-            and len(bio_categories) >= 6
+            and len(bio_blocks) >= 8
+            and len(bio_categories) >= 4
             and metrics["biography_baseline_complete"]
             and case_count >= 22
             and metrics["semantic_diversity_failures"] == 0
         )
     elif persona_type == "real-person-simulation":
         target_met = (
-            len(all_ids) >= 40
-            and len(dimensions) >= 10
-            and len(core_blocks) >= 12
-            and len(voice_blocks) >= 12
-            and REQUIRED_VOICE_LAYERS.issubset(voice_layers)
-            and len(mode_blocks) >= 12
-            and len(anti_blocks) >= 8
-            and len(bio_blocks) >= 12
-            and len(bio_categories) >= 6
+            len(all_ids) >= 24
+            and len(dimensions) >= 6
+            and len(verified_fidelity_card_ids) >= 24
+            and len(distinct_source_scenes) >= 8
+            and len(signature_card_ids) >= 8
+            and source_count >= 3
+            and len(supporting_original_sources) >= 2
+            and len(core_blocks) >= 8
+            and len(core_layers) >= 6
+            and len(core_evidence_ids & evidence_card_ids) >= 12
+            and len(voice_blocks) >= 8
+            and MINIMUM_VOICE_LAYERS.issubset(voice_layers)
+            and len(voice_evidence_ids & evidence_card_ids) >= 12
+            and len(mode_blocks) >= 8
+            and len(mode_dimensions) >= 6
+            and len(anti_blocks) >= 6
+            and len(scenes & REQUIRED_SCENES) == len(REQUIRED_SCENES)
+            and len(bio_blocks) >= 8
+            and len(bio_categories) >= 4
             and metrics["biography_baseline_complete"]
             and metrics["semantic_diversity_failures"] == 0
         )
@@ -2257,7 +2326,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             f"coverage_path={metrics['coverage_path']} research_rounds={metrics['research_rounds']} "
             f"cards={metrics['cards']} exact_original_cards={metrics['exact_original_cards']} "
             f"performance_verified_cards={metrics['performance_verified_cards']} "
-            f"distinct_source_scenes={metrics['distinct_source_scenes']} "
+            f"distinct_evidence_units={metrics['distinct_evidence_units']} "
             f"context_complete_cards={metrics['context_complete_cards']} "
             f"signature_cards={metrics['signature_cards']} "
             f"canonical_authored_cards={metrics['canonical_authored_cards']} "

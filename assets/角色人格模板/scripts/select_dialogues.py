@@ -36,7 +36,10 @@ STRONG_KEYS = {"speech_act", "trigger", "interaction"}
 SIGNATURE_LEVELS = {"核心", "常用"}
 VERIFIED_LABEL_EVIDENCE = {"原文可见", "上下文可见", "来源明确", "用户确认"}
 VERIFIED_ORIGINAL_QUALITIES = {"原声核验", "原语言文本核验", "原始版式核验", "原创确认"}
-COMPLETE_SCENES = {"完整", "原创设定"}
+COMPLETE_SCENES = {"完整", "语境充分", "原创设定"}
+CONVERSATIONAL_CONTEXTS = {"对话场景", "访谈回答"}
+NARRATIVE_CONTEXTS = {"叙事场景", "内心独白"}
+SELF_CONTAINED_CONTEXTS = {"演讲发言", "博客文章", "社交媒体", "书信"}
 CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 HIGH_RISKS = {"high", "critical", "danger", "severe"}
 
@@ -55,6 +58,7 @@ class Card:
     recognition: str
     scene_id: str
     scene_completeness: str
+    context_type: str
     interaction_function: str
     reaction: str
     interaction_position: str
@@ -179,6 +183,7 @@ def load_cards(root: Path) -> List[Card]:
                     recognition=field_value(block, "识别度"),
                     scene_id=field_value(block, "场景编号"),
                     scene_completeness=field_value(block, "场景完整度"),
+                    context_type=field_value(block, "语境类型"),
                     interaction_function=field_value(block, "互动功能"),
                     reaction=field_value(block, "角色即时反应"),
                     interaction_position=field_value(block, "互动位置"),
@@ -261,9 +266,17 @@ def evidence_for_match(card: Card, matched: Set[str]) -> Tuple[str, Tuple[str, .
         not context_is_missing(value)
         for value in (card.previous_text, card.trigger_text, card.next_text, card.dialogue_target)
     )
-    if verified_count >= 3 and context_count >= 3:
+    if card.context_type in CONVERSATIONAL_CONTEXTS:
+        required_for_high, required_for_medium = 3, 2
+    elif card.context_type in NARRATIVE_CONTEXTS:
+        required_for_high, required_for_medium = 2, 1
+    elif card.context_type in SELF_CONTAINED_CONTEXTS:
+        required_for_high, required_for_medium = 1, 1
+    else:
+        required_for_high, required_for_medium = 3, 2
+    if verified_count >= 3 and context_count >= required_for_high:
         return "high", ()
-    if verified_count >= 2 and context_count >= 2:
+    if verified_count >= 2 and context_count >= required_for_medium:
         return "medium", ()
     return "low", ("semantic-context-too-thin",)
 
@@ -283,7 +296,7 @@ def score_card(card: Card, query: Dict[str, str]) -> Optional[Match]:
             score += weight
             matched.append(key)
 
-    if card.source_type == "原作明确":
+    if card.source_type in {"原作明确", "本人公开表达"}:
         score += 2
     if card.original_quality == "原声核验":
         score += 3
@@ -538,6 +551,7 @@ def json_output(
                 "recognition": item.card.recognition,
                 "scene_id": item.card.scene_id,
                 "scene_completeness": item.card.scene_completeness,
+                "context_type": item.card.context_type,
                 "interaction_function": item.card.interaction_function,
                 "reaction": item.card.reaction,
                 "interaction_position": item.card.interaction_position,
