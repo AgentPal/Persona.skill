@@ -29,6 +29,7 @@ VOICE_HEADING_RE = re.compile(r"^###\s+(VOICE-\d{2})\s+\|", re.MULTILINE | re.IG
 MODE_HEADING_RE = re.compile(r"^###\s+(MODE-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 CORE_HEADING_RE = re.compile(r"^###\s+(CORE-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 ANTI_HEADING_RE = re.compile(r"^###\s+(ANTI-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+BIO_HEADING_RE = re.compile(r"^###\s+(BIO-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 PLACEHOLDER_RE = re.compile(
     r"\{\{[A-Z0-9_]+\}\}|\[待填写[^\]]*\]|\b(?:TODO|TBD)\b", re.IGNORECASE
 )
@@ -46,10 +47,12 @@ REQUIRED_FILES = (
     "references/07-验证用例.md",
     "references/08-来源索引.md",
     "references/09-反角色对照.md",
+    "references/10-人物背景档案.md",
 )
 
 REQUIRED_CARD_FIELDS = (
     "检索标签",
+    "标签依据",
     "卡片类型",
     "原文",
     "原文语言",
@@ -102,6 +105,9 @@ REQUIRED_TAGS = {
     "task_state", "user_state", "emotion", "intent", "relation", "risk", "language",
     "speech_act", "trigger",
 }
+REQUIRED_LABEL_EVIDENCE = {"speech_act", "trigger", "relation", "emotion"}
+ALLOWED_LABEL_EVIDENCE = {"原文可见", "上下文可见", "来源明确", "用户确认", "合理推导", "缺失"}
+ALLOWED_EVALUATOR_TYPES = {"human", "independent-agent", "independent-context"}
 REQUIRED_VOICE_FIELDS = ("层级", "规律", "证据卡", "反证或边界", "适用条件", "置信度")
 REQUIRED_VOICE_LAYERS = {
     "lexicon", "syntax", "ending", "orality", "interaction", "emotion", "relation",
@@ -128,6 +134,16 @@ REQUIRED_SCENE_FIELDS = (
 REQUIRED_SOURCE_FIELDS = (
     "来源类型", "位置", "原始媒介与版本", "原始语言", "核验方式", "可用范围", "内容摘要", "可靠性", "支持的结论或卡片",
 )
+REQUIRED_BIO_FIELDS = (
+    "类别", "主题", "事实", "角色视角回答要点", "适用问题", "时间或版本", "来源", "置信度", "边界",
+)
+ALLOWED_BIO_CATEGORIES = {
+    "identity", "gender", "background", "timeline", "relationship", "ability", "preference", "worldview", "faq",
+}
+REQUIRED_BIO_BASELINE_FIELDS = (
+    "姓名与原名", "性别身份", "性别相关称谓与代词", "年龄或生命阶段", "物种或存在类型",
+    "社会身份或职业", "所属或阵营", "当前时间点或版本", "自我认知", "基线来源",
+)
 
 REQUIRED_SCENES = {
     "start",
@@ -148,7 +164,7 @@ REQUIRED_SCENES = {
 }
 
 REQUIRED_SKILL_TERMS = (
-    "回复前缀", "每条实际发送的 Agent", "可见消息规则", "每轮加载", "对白使用", "事实保护", "停用与恢复",
+    "回复前缀", "每条实际发送的 Agent", "可见消息规则", "每轮加载", "人物背景档案", "对白使用", "事实保护", "停用与恢复",
 )
 REQUIRED_CORE_TERMS = (
     "身份", "版本", "还原优先级", "原作媒介", "作品原始语言", "回复前缀",
@@ -310,6 +326,13 @@ def iter_anti_blocks(text: str) -> Iterable[tuple[str, str]]:
         yield match.group(1).upper(), text[match.end() : end]
 
 
+def iter_bio_blocks(text: str) -> Iterable[tuple[str, str]]:
+    matches = list(BIO_HEADING_RE.finditer(text))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        yield match.group(1).upper(), text[match.end() : end]
+
+
 def iter_scene_blocks(text: str) -> Iterable[tuple[str, str]]:
     matches = list(SCENE_HEADING_RE.finditer(text))
     for index, match in enumerate(matches):
@@ -341,6 +364,15 @@ def parse_tags(value: str | None) -> dict[str, set[str]]:
     return result
 
 
+def parse_label_evidence(value: str | None) -> dict[str, str]:
+    if not value:
+        return {}
+    return {
+        key.lower(): raw.strip()
+        for key, raw in re.findall(r"\b([a-z_]+)\s*=\s*([^;；]+)", value, re.IGNORECASE)
+    }
+
+
 def has_exact_original_text(value: str | None) -> bool:
     if not value or PLACEHOLDER_RE.search(value):
         return False
@@ -351,6 +383,84 @@ def has_exact_original_text(value: str | None) -> bool:
 def normalize_original_text(value: str) -> str:
     """Normalize only for duplicate detection; keep the stored original untouched."""
     return re.sub(r"[\W_]+", "", value, flags=re.UNICODE).casefold()
+
+
+def normalize_template_text(value: str) -> str:
+    """Remove serial numbers and quoted payloads so copy-filled prose cannot fake diversity."""
+    text = value.casefold()
+    text = re.sub(r"[“”‘’\"'`][^“”‘’\"'`]*[“”‘’\"'`]", " 引文 ", text)
+    text = re.sub(r"\b(?:core|voice|mode|anti|src|case)-\d+\b", " 编号 ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b[a-z0-9][a-z0-9-]*-\d{4}\b", " 卡片 ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\b\d+\b|[０-９]+", " 数字 ", text)
+    for layer in sorted(REQUIRED_CORE_LAYERS | ALLOWED_VOICE_LAYERS, key=len, reverse=True):
+        text = re.sub(rf"\b{re.escape(layer)}\b", " 层级 ", text, flags=re.IGNORECASE)
+    return re.sub(r"[\W_]+", "", text, flags=re.UNICODE)
+
+
+def context_is_missing(value: str | None) -> bool:
+    if not value:
+        return True
+    normalized = value.strip().lower()
+    return any(
+        marker in normalized
+        for marker in ("缺失", "未知", "不明", "未提供", "未逐句标出", "无法确认", "无法定位")
+    )
+
+
+def extract_claimed_card_ids(value: str | None) -> set[str]:
+    if not value:
+        return set()
+    result = {item.upper() for item in re.findall(r"\b[A-Z0-9][A-Z0-9-]*-\d{4}\b", value, re.IGNORECASE)}
+    range_re = re.compile(
+        r"\b([A-Z0-9][A-Z0-9-]*)-(\d{4})\s*(?:至|到|~|～|—|–)\s*(?:([A-Z0-9][A-Z0-9-]*)-)?(\d{4})\b",
+        re.IGNORECASE,
+    )
+    for match in range_re.finditer(value):
+        first_prefix, first_raw, second_prefix, second_raw = match.groups()
+        prefix = first_prefix.upper()
+        if second_prefix and second_prefix.upper() != prefix:
+            continue
+        first, second = int(first_raw), int(second_raw)
+        if second < first or second - first > 1000:
+            continue
+        result.update(f"{prefix}-{index:04d}" for index in range(first, second + 1))
+    return result
+
+
+def add_semantic_diversity_issues(
+    issues: list[Issue],
+    blocks: list[tuple[str, str]],
+    fields: tuple[str, ...],
+    code: str,
+    label: str,
+    path: Path,
+    root: Path,
+    level: str,
+) -> int:
+    if len(blocks) < 4:
+        return 0
+    minimum = max(3, (len(blocks) + 1) // 2)
+    failures: list[str] = []
+    for field in fields:
+        values = [
+            normalize_template_text(field_value(block, field) or "")
+            for _, block in blocks
+            if has_substantive_value(field_value(block, field), allow_none=True)
+        ]
+        unique_count = len({value for value in values if value})
+        if unique_count < minimum:
+            failures.append(f"{field}={unique_count}/{len(blocks)}")
+    if failures:
+        add_issue(
+            issues,
+            "error" if level == "release" else "warning",
+            code,
+            f"{label}存在批量模板化，至少需要 {minimum} 种实质不同表达；" + "，".join(failures),
+            path,
+            root,
+        )
+        return 1
+    return 0
 
 
 def has_substantive_value(value: str | None, allow_none: bool = False) -> bool:
@@ -402,6 +512,10 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         "validation_cases": 0,
         "sources": 0,
         "original_sources": 0,
+        "biography_entries": 0,
+        "biography_categories": 0,
+        "biography_baseline_complete": False,
+        "semantic_diversity_failures": 0,
     }
 
     if not root.is_dir():
@@ -613,6 +727,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     referenced_source_ids: set[str] = set()
     original_referenced_source_ids: set[str] = set()
     original_card_sources: dict[str, set[str]] = {}
+    card_source_refs: dict[str, set[str]] = {}
     exact_original_card_ids: set[str] = set()
     original_language_card_ids: set[str] = set()
     performance_verified_card_ids: set[str] = set()
@@ -625,6 +740,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     normalized_original_owners: dict[str, str] = {}
     noncanonical_card_ids: set[str] = set()
     annotation_values: dict[str, list[tuple[str, str, Path]]] = defaultdict(list)
+    missing_label_evidence_cards: list[tuple[str, Path]] = []
     for path in library_paths:
         text = read_text(path)
         for card_id, block in iter_card_blocks(text):
@@ -636,7 +752,10 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             for field in REQUIRED_CARD_FIELDS:
                 value = field_value(block, field)
                 if value is None:
-                    add_issue(issues, "error", "dialogue.field_missing", f"{card_id} 缺少字段：{field}", path, root)
+                    if field == "标签依据":
+                        missing_label_evidence_cards.append((card_id, path))
+                    else:
+                        add_issue(issues, "error", "dialogue.field_missing", f"{card_id} 缺少字段：{field}", path, root)
                 elif field in {"交流目的", "主要情绪"}:
                     dimensions.update(split_values(value))
             card_type = field_value(block, "卡片类型")
@@ -786,6 +905,8 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     root,
                 )
             tags = field_value(block, "检索标签")
+            label_evidence_value = field_value(block, "标签依据")
+            label_evidence = parse_label_evidence(label_evidence_value)
             if tags and not PLACEHOLDER_RE.search(tags):
                 present_tags = set(re.findall(r"\b([a-z_]+)\s*=", tags))
                 missing_tags = sorted(REQUIRED_TAGS - present_tags)
@@ -795,6 +916,45 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                         "error",
                         "dialogue.tags_missing",
                         f"{card_id} 缺少检索标签：{', '.join(missing_tags)}",
+                        path,
+                        root,
+                    )
+                missing_label_evidence = sorted(REQUIRED_LABEL_EVIDENCE - set(label_evidence))
+                if label_evidence_value is not None and missing_label_evidence:
+                    add_issue(
+                        issues,
+                        "error" if level == "release" else "warning",
+                        "dialogue.label_evidence_missing",
+                        f"{card_id} 缺少标签依据：{', '.join(missing_label_evidence)}",
+                        path,
+                        root,
+                    )
+                invalid_label_evidence = {
+                    key: value
+                    for key, value in label_evidence.items()
+                    if key in REQUIRED_LABEL_EVIDENCE and value not in ALLOWED_LABEL_EVIDENCE
+                }
+                if invalid_label_evidence:
+                    add_issue(
+                        issues,
+                        "error" if level == "release" else "warning",
+                        "dialogue.label_evidence_invalid",
+                        f"{card_id} 的标签依据无效："
+                        + ", ".join(f"{key}={value}" for key, value in sorted(invalid_label_evidence.items())),
+                        path,
+                        root,
+                    )
+                conflict_keys: list[str] = []
+                if context_is_missing(field_value(block, "触发话语")) and label_evidence.get("trigger") in {"上下文可见", "来源明确"}:
+                    conflict_keys.append("trigger")
+                if context_is_missing(field_value(block, "对话对象")) and label_evidence.get("relation") in {"上下文可见", "来源明确"}:
+                    conflict_keys.append("relation")
+                if conflict_keys:
+                    add_issue(
+                        issues,
+                        "error" if level == "release" else "warning",
+                        "dialogue.label_evidence_conflict",
+                        f"{card_id} 的上下文字段明确缺失，却把这些标签标成已核验：{', '.join(conflict_keys)}",
                         path,
                         root,
                     )
@@ -829,11 +989,12 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 annotation = field_value(block, annotation_field)
                 if has_substantive_value(annotation, allow_none=True):
                     annotation_values[annotation_field].append(
-                        (normalize_original_text(annotation or ""), card_id, path)
+                        (normalize_template_text(annotation or ""), card_id, path)
                     )
             source_location = field_value(block, "来源位置")
             source_refs = set(re.findall(r"\bSRC-\d{4}\b", source_location or "", re.IGNORECASE))
             normalized_source_refs = {item.upper() for item in source_refs}
+            card_source_refs[card_id] = normalized_source_refs
             referenced_source_ids.update(normalized_source_refs)
             if card_id in exact_original_card_ids and source_type == "原作明确":
                 original_referenced_source_ids.update(normalized_source_refs)
@@ -852,6 +1013,19 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     noncanonical_card_ids.add(card_id)
             elif card_id not in canonical_authored_card_ids:
                 noncanonical_card_ids.add(card_id)
+
+    if missing_label_evidence_cards:
+        missing_ids = [card_id for card_id, _ in missing_label_evidence_cards]
+        preview = ", ".join(missing_ids[:5])
+        suffix = "…" if len(missing_ids) > 5 else ""
+        add_issue(
+            issues,
+            "error" if level == "release" else "warning",
+            "dialogue.label_evidence_missing",
+            f"有 {len(missing_ids)} 张卡缺少“标签依据”字段：{preview}{suffix}",
+            missing_label_evidence_cards[0][1],
+            root,
+        )
 
     metrics["cards"] = len(all_ids)
     metrics["exact_original_cards"] = len(exact_original_card_ids)
@@ -934,16 +1108,16 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     cases_text = read_text(cases_path) if cases_path.is_file() else ""
     case_count = len(CASE_HEADING_RE.findall(cases_text))
     metrics["validation_cases"] = case_count
-    if case_count < 20:
+    if case_count < 22:
         add_issue(
             issues,
             "error" if level == "release" else "warning",
             "tests.too_few_cases",
-            f"验证用例仅 {case_count} 个，至少需要 20 个",
+            f"验证用例仅 {case_count} 个，至少需要 22 个",
             cases_path,
             root,
         )
-    required_case_ids = {"CASE-18", "CASE-19", "CASE-20"}
+    required_case_ids = {"CASE-18", "CASE-19", "CASE-20", "CASE-21", "CASE-22"}
     present_case_ids = set(re.findall(r"^##\s+(CASE-\d{2})\s+\|", cases_text, re.MULTILINE))
     missing_fidelity_cases = sorted(required_case_ids - present_case_ids)
     if missing_fidelity_cases:
@@ -957,22 +1131,28 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         )
     case_blocks = dict(iter_case_blocks(cases_text))
     fidelity_case_fields = {
-        "CASE-18": ("样本数", "正确识别数", "评估记录", "验证状态"),
-        "CASE-19": ("样本数", "正确区分数", "对照对象", "区分证据", "验证状态"),
+        "CASE-18": (
+            "样本数", "正确识别数", "评估者类型", "评估者标识", "隐藏信息", "失败样本记录", "原始记录位置", "验证状态",
+        ),
+        "CASE-19": (
+            "样本数", "正确区分数", "对照对象", "评估者类型", "评估者标识", "区分证据", "失败样本记录", "原始记录位置", "验证状态",
+        ),
         "CASE-20": ("抽查数", "可追溯数", "召回相关数", "追溯记录", "验证状态"),
+        "CASE-21": ("输入", "背景条目", "固定事实", "角色输出", "追溯记录", "验证状态"),
+        "CASE-22": ("输入", "背景条目", "未知边界", "角色输出", "追溯记录", "验证状态"),
     }
     for case_id, fields in fidelity_case_fields.items():
         block = case_blocks.get(case_id, "")
-        for field in fields:
-            if not has_substantive_value(field_value(block, field)):
-                add_issue(
-                    issues,
-                    "error" if level == "release" else "warning",
-                    "tests.fidelity_field_missing",
-                    f"{case_id} 缺少可用字段：{field}",
-                    cases_path,
-                    root,
-                )
+        missing_fields = [field for field in fields if not has_substantive_value(field_value(block, field))]
+        if missing_fields:
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "tests.fidelity_field_missing",
+                f"{case_id} 缺少可用字段：{', '.join(missing_fields)}",
+                cases_path,
+                root,
+            )
         status = field_value(block, "验证状态")
         if level == "release" and status != "通过":
             add_issue(
@@ -980,6 +1160,28 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 "error",
                 "tests.fidelity_not_passed",
                 f"{case_id} 的验证状态必须是“通过”，当前为：{status or '缺失'}",
+                cases_path,
+                root,
+            )
+    for case_id in ("CASE-18", "CASE-19"):
+        block = case_blocks.get(case_id, "")
+        evaluator_type = field_value(block, "评估者类型")
+        evaluator_id = field_value(block, "评估者标识") or ""
+        if evaluator_type and evaluator_type not in ALLOWED_EVALUATOR_TYPES:
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "tests.evaluator_type_invalid",
+                f"{case_id} 的评估者类型必须是 human、independent-agent 或 independent-context",
+                cases_path,
+                root,
+            )
+        if re.search(r"同一|生成者|当前agent|自评|self", evaluator_id, re.IGNORECASE):
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "tests.self_evaluation_forbidden",
+                f"{case_id} 不能由生成答案的同一上下文自评：{evaluator_id}",
                 cases_path,
                 root,
             )
@@ -1042,6 +1244,21 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 sources_path,
                 root,
             )
+        claimed_cards = extract_claimed_card_ids(field_value(block, "支持的结论或卡片"))
+        if claimed_cards:
+            actual_cards = {card_id for card_id, refs in card_source_refs.items() if source_id in refs}
+            false_claims = sorted(claimed_cards - actual_cards)
+            if false_claims:
+                preview = ", ".join(false_claims[:5])
+                suffix = "…" if len(false_claims) > 5 else ""
+                add_issue(
+                    issues,
+                    "error" if level == "release" else "warning",
+                    "sources.card_claim_mismatch",
+                    f"{source_id} 声称支持 {len(false_claims)} 张未实际引用该来源的卡：{preview}{suffix}",
+                    sources_path,
+                    root,
+                )
     supporting_original_sources = original_source_ids & original_referenced_source_ids
     verified_original_card_ids = {
         card_id for card_id, source_refs in original_card_sources.items() if source_refs & original_source_ids
@@ -1077,6 +1294,172 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             f"有 {len(translated_or_unverified_cards)} 张卡不是作品原始语言的已核验原文，不能计入角色还原语料："
             + ", ".join(translated_or_unverified_cards[:5]),
             root / "references",
+            root,
+        )
+
+    bio_path = root / "references" / "10-人物背景档案.md"
+    bio_text = read_text(bio_path) if bio_path.is_file() else ""
+    bio_blocks = list(iter_bio_blocks(bio_text))
+    bio_ids = {bio_id for bio_id, _ in bio_blocks}
+    missing_bio_baseline_fields: list[str] = []
+    for field in REQUIRED_BIO_BASELINE_FIELDS:
+        allow_none = field in {
+            "性别身份", "性别相关称谓与代词", "年龄或生命阶段", "所属或阵营",
+        }
+        if not has_substantive_value(field_value(bio_text, field), allow_none=allow_none):
+            missing_bio_baseline_fields.append(field)
+    if missing_bio_baseline_fields:
+        add_issue(
+            issues,
+            "error" if level == "release" else "warning",
+            "biography.baseline_missing",
+            "人物背景缺少常驻身份基线字段：" + ", ".join(missing_bio_baseline_fields),
+            bio_path,
+            root,
+        )
+    baseline_source_ids = set(
+        re.findall(r"\bSRC-\d{4}\b", field_value(bio_text, "基线来源") or "", re.IGNORECASE)
+    )
+    unknown_baseline_sources = sorted({source_id.upper() for source_id in baseline_source_ids} - set(source_ids))
+    if not baseline_source_ids:
+        add_issue(
+            issues,
+            "error" if level == "release" else "warning",
+            "biography.baseline_source_missing",
+            "常驻身份基线必须引用至少一个 SRC-来源",
+            bio_path,
+            root,
+        )
+    if unknown_baseline_sources:
+        add_issue(
+            issues,
+            "error" if level == "release" else "warning",
+            "biography.baseline_source_invalid",
+            "常驻身份基线引用了不存在的来源：" + ", ".join(unknown_baseline_sources),
+            bio_path,
+            root,
+        )
+    metrics["biography_baseline_complete"] = not missing_bio_baseline_fields and bool(baseline_source_ids) and not unknown_baseline_sources
+    duplicate_bio_ids = sorted(
+        bio_id for bio_id, count in Counter(item[0] for item in bio_blocks).items() if count > 1
+    )
+    if duplicate_bio_ids:
+        add_issue(
+            issues,
+            "error",
+            "biography.duplicate_id",
+            "人物背景档案编号重复：" + ", ".join(duplicate_bio_ids),
+            bio_path,
+            root,
+        )
+    for case_id in ("CASE-21", "CASE-22"):
+        referenced_bio_ids = set(re.findall(r"\bBIO-\d{2}\b", field_value(case_blocks.get(case_id, ""), "背景条目") or ""))
+        if not referenced_bio_ids:
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "tests.biography_reference_missing",
+                f"{case_id} 至少需要引用一个 BIO-人物背景条目",
+                cases_path,
+                root,
+            )
+        unknown_bio_ids = sorted(referenced_bio_ids - bio_ids)
+        if unknown_bio_ids:
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "tests.biography_reference_invalid",
+                f"{case_id} 引用了不存在的人物背景条目：{', '.join(unknown_bio_ids)}",
+                cases_path,
+                root,
+            )
+    bio_categories: set[str] = set()
+    for bio_id, block in bio_blocks:
+        for field in REQUIRED_BIO_FIELDS:
+            if not has_substantive_value(field_value(block, field)):
+                add_issue(
+                    issues,
+                    "error" if level == "release" else "warning",
+                    "biography.field_missing",
+                    f"{bio_id} 缺少可用字段：{field}",
+                    bio_path,
+                    root,
+                )
+        category = (field_value(block, "类别") or "").strip().lower()
+        if category:
+            if category not in ALLOWED_BIO_CATEGORIES:
+                add_issue(
+                    issues,
+                    "error" if level == "release" else "warning",
+                    "biography.category_invalid",
+                    f"{bio_id} 的类别无效：{category}",
+                    bio_path,
+                    root,
+                )
+            else:
+                bio_categories.add(category)
+        bio_source_ids = set(re.findall(r"\bSRC-\d{4}\b", field_value(block, "来源") or "", re.IGNORECASE))
+        normalized_bio_sources = {source_id.upper() for source_id in bio_source_ids}
+        if not normalized_bio_sources:
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "biography.source_missing",
+                f"{bio_id} 没有引用 SRC-来源；人物事实不能由模型印象补齐",
+                bio_path,
+                root,
+            )
+        unknown_bio_sources = sorted(normalized_bio_sources - set(source_ids))
+        if unknown_bio_sources:
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "biography.source_invalid",
+                f"{bio_id} 引用了不存在的来源：{', '.join(unknown_bio_sources)}",
+                bio_path,
+                root,
+            )
+    metrics["biography_entries"] = len(bio_blocks)
+    metrics["biography_categories"] = len(bio_categories)
+    metrics["semantic_diversity_failures"] += add_semantic_diversity_issues(
+        issues,
+        bio_blocks,
+        ("主题", "事实", "角色视角回答要点", "适用问题", "边界"),
+        "biography.semantic_boilerplate",
+        "人物背景档案",
+        bio_path,
+        root,
+        level,
+    )
+    bio_target, bio_category_target = (
+        (12, 6) if persona_type in {"existing-character", "real-person-simulation"} else (8, 4)
+    )
+    if level == "release" and len(bio_blocks) < bio_target:
+        add_issue(
+            issues,
+            target_severity,
+            "biography.count_low",
+            f"人物背景条目仅 {len(bio_blocks)} 个，正式版收集目标为 {bio_target} 个",
+            bio_path,
+            root,
+        )
+    if level == "release" and len(bio_categories) < bio_category_target:
+        add_issue(
+            issues,
+            target_severity,
+            "biography.categories_low",
+            f"人物背景仅覆盖 {len(bio_categories)} 类，正式版目标为 {bio_category_target} 类",
+            bio_path,
+            root,
+        )
+    missing_identity_categories = sorted({"identity", "gender", "relationship"} - bio_categories)
+    if level == "release" and missing_identity_categories:
+        add_issue(
+            issues,
+            target_severity,
+            "biography.identity_coverage_missing",
+            "人物背景缺少身份、性别或关系类别：" + ", ".join(missing_identity_categories),
+            bio_path,
             root,
         )
 
@@ -1148,6 +1531,16 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     metrics["core_rules"] = len(core_blocks)
     metrics["core_layers"] = len(core_layers)
     metrics["core_evidence_cards"] = len(core_evidence_ids & evidence_card_ids)
+    metrics["semantic_diversity_failures"] += add_semantic_diversity_issues(
+        issues,
+        core_blocks,
+        ("结论", "可观察行为", "适用条件"),
+        "core_rule.semantic_boilerplate",
+        "角色核心规则",
+        core_path,
+        root,
+        level,
+    )
 
     voice_path = root / "references" / "02-语言声纹.md"
     voice_text = read_text(voice_path) if voice_path.is_file() else ""
@@ -1224,6 +1617,16 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     metrics["voice_rules"] = len(voice_blocks)
     metrics["voice_layers"] = len(voice_layers)
     metrics["voice_evidence_cards"] = len(voice_evidence_ids & evidence_card_ids)
+    metrics["semantic_diversity_failures"] += add_semantic_diversity_issues(
+        issues,
+        voice_blocks,
+        ("规律", "反证或边界", "适用条件"),
+        "voice.semantic_boilerplate",
+        "语言声纹规则",
+        voice_path,
+        root,
+        level,
+    )
     missing_required_voice_layers = sorted(REQUIRED_VOICE_LAYERS - voice_layers)
     if level == "release" and persona_type in {"existing-character", "real-person-simulation"} and missing_required_voice_layers:
         add_issue(
@@ -1288,6 +1691,16 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             )
     metrics["emotion_modes"] = len(mode_blocks)
     metrics["mode_dimensions"] = len(mode_dimensions)
+    metrics["semantic_diversity_failures"] += add_semantic_diversity_issues(
+        issues,
+        mode_blocks,
+        ("触发", "角色即时反应", "语言变化", "响应形态", "口语节奏"),
+        "mode.semantic_boilerplate",
+        "情绪关系模式",
+        mode_path,
+        root,
+        level,
+    )
 
     anti_path = root / "references" / "09-反角色对照.md"
     anti_text = read_text(anti_path) if anti_path.is_file() else ""
@@ -1339,6 +1752,16 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             )
     metrics["anti_rules"] = len(anti_blocks)
     metrics["anti_evidence_cards"] = len(anti_evidence_ids & evidence_card_ids)
+    metrics["semantic_diversity_failures"] += add_semantic_diversity_issues(
+        issues,
+        anti_blocks,
+        ("模式", "检测信号", "为什么不像", "角色替代结构"),
+        "anti.semantic_boilerplate",
+        "反角色规则",
+        anti_path,
+        root,
+        level,
+    )
 
     core_target, core_layer_target, core_evidence_target, voice_target, voice_layer_target, voice_evidence_target, mode_target, mode_dimension_target, anti_target = (
         (12, 10, 20, 12, 9, 20, 12, 8, 8)
@@ -1443,6 +1866,16 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 root,
             )
     metrics["work_scenes"] = len(scenes & REQUIRED_SCENES)
+    metrics["semantic_diversity_failures"] += add_semantic_diversity_issues(
+        issues,
+        [(scene_id, block) for scene_id, block in scene_blocks if scene_id in REQUIRED_SCENES],
+        ("触发", "原作互动功能", "角色即时反应", "事实嵌入方式", "禁止退化"),
+        "scene.semantic_boilerplate",
+        "工作场景迁移",
+        scene_path,
+        root,
+        level,
+    )
 
     if level == "release" and persona_type == "existing-character":
         if len(verified_fidelity_card_ids) < 80:
@@ -1521,7 +1954,11 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and len(mode_dimensions) >= 8
             and len(anti_blocks) >= 8
             and len(scenes & REQUIRED_SCENES) == len(REQUIRED_SCENES)
-            and case_count >= 20
+            and len(bio_blocks) >= 12
+            and len(bio_categories) >= 6
+            and metrics["biography_baseline_complete"]
+            and case_count >= 22
+            and metrics["semantic_diversity_failures"] == 0
         )
     elif persona_type == "real-person-simulation":
         target_met = (
@@ -1532,6 +1969,10 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and REQUIRED_VOICE_LAYERS.issubset(voice_layers)
             and len(mode_blocks) >= 12
             and len(anti_blocks) >= 8
+            and len(bio_blocks) >= 12
+            and len(bio_categories) >= 6
+            and metrics["biography_baseline_complete"]
+            and metrics["semantic_diversity_failures"] == 0
         )
     elif persona_type in {"original-persona", "composite-original"}:
         target_met = (
@@ -1541,6 +1982,10 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and len(voice_blocks) >= 8
             and len(mode_blocks) >= 8
             and len(anti_blocks) >= 6
+            and len(bio_blocks) >= 8
+            and len(bio_categories) >= 4
+            and metrics["biography_baseline_complete"]
+            and metrics["semantic_diversity_failures"] == 0
         )
     if target_met:
         metrics["coverage_path"] = "target-met"
@@ -1649,6 +2094,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
             f"voice_rules={metrics['voice_rules']} voice_layers={metrics['voice_layers']} "
             f"voice_evidence_cards={metrics['voice_evidence_cards']} "
             f"anti_rules={metrics['anti_rules']} anti_evidence_cards={metrics['anti_evidence_cards']} "
+            f"biography_entries={metrics['biography_entries']} "
+            f"biography_categories={metrics['biography_categories']} "
+            f"biography_baseline_complete={metrics['biography_baseline_complete']} "
+            f"semantic_diversity_failures={metrics['semantic_diversity_failures']} "
             f"emotion_modes={metrics['emotion_modes']} mode_dimensions={metrics['mode_dimensions']} "
             f"scenes={metrics['work_scenes']} cases={metrics['validation_cases']} "
             f"sources={metrics['sources']} original_sources={metrics['original_sources']}"

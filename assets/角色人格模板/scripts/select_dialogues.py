@@ -30,6 +30,8 @@ WEIGHTS = {
 HIGH_RISKS = {"high", "critical", "danger", "severe"}
 LOW_RISKS = {"none", "low"}
 SIGNATURE_LEVELS = {"核心", "常用"}
+VERIFIED_LABEL_EVIDENCE = {"原文可见", "上下文可见", "来源明确", "用户确认"}
+CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,11 @@ class Card:
     recognition: str
     scene_id: str
     interaction_function: str
+    label_evidence: Dict[str, str]
+    previous_text: str
+    trigger_text: str
+    next_text: str
+    dialogue_target: str
 
 
 @dataclass(frozen=True)
@@ -54,6 +61,8 @@ class Match:
     score: int
     matched: Tuple[str, ...]
     tier: int
+    evidence_level: str
+    evidence_gaps: Tuple[str, ...]
 
 
 def read_text(path: Path) -> str:
@@ -76,6 +85,22 @@ def field_value(block: str, field: str) -> str:
 def parse_tags(block: str) -> Dict[str, Set[str]]:
     tag_line = field_value(block, "检索标签")
     return {key.lower(): split_values(value) for key, value in TAG_RE.findall(tag_line)}
+
+
+def parse_label_evidence(block: str) -> Dict[str, str]:
+    value = field_value(block, "标签依据")
+    return {
+        key.lower(): raw.strip()
+        for key, raw in TAG_RE.findall(value)
+    }
+
+
+def context_is_missing(value: str) -> bool:
+    normalized = value.strip().lower()
+    return not normalized or any(
+        marker in normalized
+        for marker in ("缺失", "未知", "不明", "未提供", "未逐句标出", "无法确认", "无法定位")
+    )
 
 
 def iter_card_blocks(text: str) -> Iterable[Tuple[str, str]]:
@@ -120,6 +145,11 @@ def load_cards(root: Path) -> List[Card]:
                     recognition=field_value(block, "识别度"),
                     scene_id=field_value(block, "场景编号"),
                     interaction_function=field_value(block, "互动功能"),
+                    label_evidence=parse_label_evidence(block),
+                    previous_text=field_value(block, "前置原文"),
+                    trigger_text=field_value(block, "触发话语"),
+                    next_text=field_value(block, "后续原文"),
+                    dialogue_target=field_value(block, "对话对象"),
                 )
             )
     return cards
@@ -144,6 +174,36 @@ def risk_allowed(query: str, values: Set[str]) -> bool:
     if normalized in LOW_RISKS and values <= HIGH_RISKS:
         return False
     return True
+
+
+def evidence_for_match(card: Card, matched: Set[str]) -> Tuple[str, Tuple[str, ...]]:
+    gaps: List[str] = []
+    semantic_keys = matched & {"speech_act", "trigger", "relation", "emotion"}
+    for key in sorted(semantic_keys):
+        evidence = card.label_evidence.get(key, "")
+        if not evidence:
+            gaps.append(f"{key}:missing-evidence")
+        elif evidence not in VERIFIED_LABEL_EVIDENCE:
+            gaps.append(f"{key}:{evidence}")
+    if "trigger" in matched and context_is_missing(card.trigger_text):
+        gaps.append("trigger:missing-context")
+    if "relation" in matched and context_is_missing(card.dialogue_target):
+        gaps.append("relation:missing-target")
+    if card.original_quality not in {"原声核验", "原语言文本核验", "原始版式核验", "原创确认"}:
+        gaps.append("original:unverified")
+
+    if gaps:
+        return "low", tuple(sorted(set(gaps)))
+    verified_count = sum(card.label_evidence.get(key) in VERIFIED_LABEL_EVIDENCE for key in semantic_keys)
+    context_count = sum(
+        not context_is_missing(value)
+        for value in (card.previous_text, card.trigger_text, card.next_text, card.dialogue_target)
+    )
+    if verified_count >= 2 and context_count >= 2:
+        return "high", ()
+    if verified_count >= 1:
+        return "medium", ()
+    return "low", ("no-semantic-evidence",)
 
 
 def score_card(card: Card, query: Dict[str, str]) -> Optional[Match]:
@@ -183,11 +243,28 @@ def score_card(card: Card, query: Dict[str, str]) -> Optional[Match]:
         tier = 1
     else:
         tier = 0
-    return Match(card=card, score=score, matched=tuple(matched), tier=tier)
+    evidence_level, evidence_gaps = evidence_for_match(card, matched_set)
+    return Match(
+        card=card,
+        score=score,
+        matched=tuple(matched),
+        tier=tier,
+        evidence_level=evidence_level,
+        evidence_gaps=evidence_gaps,
+    )
 
 
 def choose_matches(matches: Sequence[Match], limit: int) -> List[Match]:
-    ranked = sorted(matches, key=lambda item: (-item.tier, -item.score, item.card.card_id))
+    ranked = sorted(
+        matches,
+        key=lambda item: (
+            -min(item.tier, CONFIDENCE_RANK[item.evidence_level] + 1),
+            -CONFIDENCE_RANK[item.evidence_level],
+            -item.tier,
+            -item.score,
+            item.card.card_id,
+        ),
+    )
     chosen: List[Match] = []
     used_scenes: Set[str] = set()
     for candidate in ranked:
@@ -248,20 +325,40 @@ def retrieval_diagnostics(matches: Sequence[Match], query: Dict[str, str]) -> Di
     high_count = sum(item.tier == 3 for item in matches)
     medium_or_high_count = sum(item.tier >= 2 for item in matches)
     if high_count >= min(3, len(matches)) and matches:
-        confidence = "high"
+        match_confidence = "high"
     elif medium_or_high_count >= min(3, len(matches)) and matches:
-        confidence = "medium"
+        match_confidence = "medium"
     else:
-        confidence = "low"
+        match_confidence = "low"
+    high_evidence_count = sum(item.evidence_level == "high" for item in matches)
+    medium_or_high_evidence_count = sum(item.evidence_level in {"medium", "high"} for item in matches)
+    if high_evidence_count >= min(3, len(matches)) and matches:
+        evidence_confidence = "high"
+    elif medium_or_high_evidence_count >= min(3, len(matches)) and matches:
+        evidence_confidence = "medium"
+    else:
+        evidence_confidence = "low"
+    confidence = min((match_confidence, evidence_confidence), key=lambda value: CONFIDENCE_RANK[value])
     requested = {key for key in WEIGHTS if query.get(key, "").strip()}
     covered = {key for item in matches for key in item.matched}
     gaps = sorted(requested - covered)
-    warning = "" if confidence != "low" else "没有足够高相关卡片；不要把弱相关卡当作角色证据。"
+    evidence_gaps = sorted({gap for item in matches for gap in item.evidence_gaps})
+    warnings: List[str] = []
+    if match_confidence == "low":
+        warnings.append("标签匹配不足")
+    if evidence_confidence == "low":
+        warnings.append("上下文或标签依据不足")
+    warning = "；".join(warnings) + ("；不要把弱相关卡当作角色证据。" if warnings else "")
     return {
         "confidence": confidence,
+        "match_confidence": match_confidence,
+        "evidence_confidence": evidence_confidence,
         "high_signal_cards": high_count,
         "medium_or_high_cards": medium_or_high_count,
+        "high_evidence_cards": high_evidence_count,
+        "medium_or_high_evidence_cards": medium_or_high_evidence_count,
         "query_gaps": gaps,
+        "evidence_gaps": evidence_gaps,
         "warning": warning,
     }
 
@@ -273,6 +370,8 @@ def markdown_output(
     lines = [
         f"<!-- selected={len(matches)} library_cards={card_count} confidence={retrieval['confidence']} -->",
         f"- 召回置信度：{retrieval['confidence']}",
+        f"- 标签匹配置信度：{retrieval['match_confidence']}",
+        f"- 证据完整度：{retrieval['evidence_confidence']}",
     ]
     if retrieval["warning"]:
         lines.append(f"- 警告：{retrieval['warning']}")
@@ -284,6 +383,8 @@ def markdown_output(
                 f"## {item.card.card_id}",
                 f"- 匹配分：{item.score}",
                 f"- 相关层级：{('high' if item.tier == 3 else 'medium' if item.tier == 2 else 'low')}",
+                f"- 证据完整度：{item.evidence_level}",
+                f"- 证据缺口：{', '.join(item.evidence_gaps) if item.evidence_gaps else '无'}",
                 f"- 命中维度：{matched}",
                 f"- 对白库文件：{item.card.source_file}",
                 item.card.block,
@@ -317,6 +418,8 @@ def json_output(
                 "card_id": item.card.card_id,
                 "score": item.score,
                 "relevance": "high" if item.tier == 3 else ("medium" if item.tier == 2 else "low"),
+                "evidence_confidence": item.evidence_level,
+                "evidence_gaps": list(item.evidence_gaps),
                 "matched": list(item.matched),
                 "source_file": item.card.source_file,
                 "source_type": item.card.source_type,

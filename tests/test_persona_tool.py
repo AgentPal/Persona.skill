@@ -45,9 +45,12 @@ def card_text(
     original_quality = "原声核验" if existing else "原创确认"
     scene_number = ((index - 1) % max(scene_count, 1)) + 1
     recognition = "核心" if index <= signature_count else "补充"
+    annotation_styles = ("追问", "转折", "邀请", "拒绝", "缓和", "确认", "自修正", "短促收束")
+    annotation_style = annotation_styles[(index - 1) % len(annotation_styles)]
     return f"""## {card_id}
 
 - 检索标签：task_state={task_state}; user_state={user_states[(index - 1) % 4]}; emotion={emotions[(index - 1) % 8]}; intent={intents[(index - 1) % 8]}; relation=familiar; risk={risk}; language=zh-CN; speech_act={intents[(index - 1) % 8]}; trigger={task_state}
+- 标签依据：speech_act=原文可见; trigger=上下文可见; relation=上下文可见; emotion=原文可见
 - 卡片类型：{card_type}
 - 原文：{'原作逐字原句' if existing else '原创规范原句'} {index}
 - 原文语言：zh-CN
@@ -58,23 +61,23 @@ def card_text(
 - 来源位置：{source_id}，测试定位 {index}
 - 作品定位：测试作品第 {scene_number} 场，位置 {index}
 - 场景编号：SCENE-{scene_number:04d}
-- 前置原文：前一句测试原文 {index}
-- 触发话语：测试触发 {index}
-- 后续原文：后一句测试原文 {index}
+- 前置原文：{annotation_style}前一句测试原文 {index}
+- 触发话语：{annotation_style}触发话语 {index}
+- 后续原文：{annotation_style}后一句测试原文 {index}
 - 对话对象：熟悉的同伴
 - 关系距离：familiar
 - 交流目的：{intents[(index - 1) % 8]}
 - 互动功能：{intents[(index - 1) % 8]}-{index}
 - 主要情绪：{emotions[(index - 1) % 8]}
 - 情绪强度：2
-- 情绪转折：情绪变化 {index}
-- 非语言反应：动作观察 {index}
-- 语音表现：原声语速重音观察 {index}
-- 词汇标记：词汇标记 {index}
-- 语法标记：语法标记 {index}
-- 语气标记：语气标记 {index}
-- 口语现象：口语现象观察 {index}
-- 句式与节奏：句式节奏观察 {index}
+- 情绪转折：{annotation_style}情绪变化 {index}
+- 非语言反应：{annotation_style}动作观察 {index}
+- 语音表现：{annotation_style}原声语速重音观察 {index}
+- 词汇标记：{annotation_style}词汇标记 {index}
+- 语法标记：{annotation_style}语法标记 {index}
+- 语气标记：{annotation_style}语气标记 {index}
+- 口语现象：{annotation_style}口语现象观察 {index}
+- 句式与节奏：{annotation_style}句式节奏观察 {index}
 - 识别度：{recognition}
 - 可直接使用：视场景
 - 不适用场景：事实未确认时
@@ -114,12 +117,17 @@ def build_fixture(
 
     cases_path = target / "references" / "07-验证用例.md"
     cases_text = cases_path.read_text(encoding="utf-8")
+    biography_case_last = 12 if persona_type in {"existing-character", "real-person-simulation"} else 8
     fidelity_cases = {
         "CASE-18": """## CASE-18 | 去名盲测
 
 - 样本数：12
 - 正确识别数：10
-- 评估记录：测试盲测记录
+- 评估者类型：independent-context
+- 评估者标识：隔离评测上下文 A
+- 隐藏信息：隐藏角色名、前缀、口头禅和作品名
+- 失败样本记录：2 个误识别样本，见原始记录
+- 原始记录位置：tests/blind-record-a
 - 验证状态：通过
 """,
         "CASE-19": """## CASE-19 | 相似角色与通用助手区分
@@ -127,7 +135,11 @@ def build_fixture(
 - 样本数：10
 - 正确区分数：8
 - 对照对象：通用助手和相似角色
+- 评估者类型：independent-agent
+- 评估者标识：独立评测 Agent B
 - 区分证据：CORE、VOICE 与原文卡映射
+- 失败样本记录：2 个混淆样本，见原始记录
+- 原始记录位置：tests/contrast-record-b
 - 验证状态：通过
 """,
         "CASE-20": """## CASE-20 | 原文与声纹证据追溯
@@ -136,6 +148,24 @@ def build_fixture(
 - 可追溯数：6
 - 召回相关数：5
 - 追溯记录：六个测试场景的完整映射
+- 验证状态：通过
+""",
+        "CASE-21": """## CASE-21 | 身份与人物小传问答
+
+- 输入：你是谁
+- 背景条目：BIO-01
+- 固定事实：姓名、身份和当前版本
+- 角色输出：以第一人称自然说明身份
+- 追溯记录：BIO-01、SRC-0001、CORE-01、VOICE-01
+- 验证状态：通过
+""",
+        "CASE-22": f"""## CASE-22 | 人物关系与未知事实边界
+
+- 输入：你和同伴是什么关系，还有哪些没说过的过去
+- 背景条目：BIO-04、BIO-{biography_case_last:02d}
+- 未知边界：关系按作品阶段回答，来源未说明的过去保持未知
+- 角色输出：说明已知关系并明确不编造未知经历
+- 追溯记录：BIO-04、BIO-{biography_case_last:02d}、SRC-0001、CORE-01、VOICE-01
 - 验证状态：通过
 """,
     }
@@ -176,6 +206,23 @@ def build_fixture(
         "emotion", "identity", "anti-core", "value", "judgment",
     )
     core_entries = []
+    core_conclusions = (
+        "遇到危险时把人的安全放在规则之前", "面对命令时先确认是否符合自己的判断", "希望同伴能按自己的意愿行动",
+        "偏向当下可见的人而不是抽象效率", "拒绝以伤害换取更快完成", "看到卡点会主动靠近并接手一部分",
+        "对熟人会用追问缩短关系距离", "高兴时先直接分享再邀请同行", "把帮助具体的人视为自我身份",
+        "不会用中立话术掩盖明确偏好", "判断失误时会承认并立刻调整", "等待时会把注意力转向仍可做的事",
+    )
+    core_behaviors = (
+        "先阻止危险动作再解释原因", "用反问确认决定是否出自本人", "给出空间但不替同伴做选择",
+        "先处理眼前求助再讨论流程", "直接说不并保留恢复路径", "主动提出共同完成一个具体动作",
+        "先接住情绪再追问真正顾虑", "用短感叹表达高兴并马上邀约", "反复选择帮助普通人的任务",
+        "明确表达喜欢与不喜欢", "说清自己错在哪里并改动作", "等待结果时寻找可并行的小任务",
+    )
+    core_conditions = (
+        "生命或数据不可逆风险出现时", "权威命令与个人判断冲突时", "同伴犹豫或被迫选择时", "效率与具体求助冲突时",
+        "方案可能造成不可逆伤害时", "同伴被明确障碍卡住时", "熟人情绪低落但愿意交流时", "共同任务取得可见进展时",
+        "需要说明为何主动帮助时", "回答容易退化成中立助手时", "自身理解或操作出现错误时", "外部构建或网络尚未返回时",
+    )
     for index in range(1, core_count + 1):
         first = ((index - 1) * 2 % evidence_count) + 1
         second = (first % evidence_count) + 1
@@ -183,12 +230,12 @@ def build_fixture(
             f"""### CORE-{index:02d} | 测试核心 {index}
 
 - 层级：{core_layers[index - 1]}
-- 结论：可观察角色结论 {index}
-- 可观察行为：行为证据 {index}
+- 结论：{core_conclusions[index - 1]}
+- 可观察行为：{core_behaviors[index - 1]}
 - 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
 - 其他来源：SRC-0001
 - 反证或边界：核心边界 {index}
-- 适用条件：核心条件 {index}
+- 适用条件：{core_conditions[index - 1]}
 - 置信度：高
 """
         )
@@ -203,6 +250,23 @@ def build_fixture(
         "translation", "anti-voice", "lexicon", "syntax", "interaction",
     )
     voice_entries = []
+    voice_patterns = (
+        "偏好使用具体动作词而不是抽象流程名词", "常用短句接长句并以追问推动对话", "句尾会在邀请与直接判断之间切换",
+        "可见停顿多出现在自我修正和转折之前", "接话时先回应对方最后一个具体词", "轻快状态会缩短解释并增加邀请",
+        "面对熟人与陌生人采用不同称呼距离", "跨语言时保留反应在前和短句断开", "避免完整客服安抚和无立场总结",
+        "表达偏好时重复关键动作词", "反对时先给短否定再补事实", "邀请合作时用共同动作替代任务分派",
+    )
+    voice_boundaries = (
+        "技术名词必须准确时不强行替换", "复杂事实需要完整句时允许变长", "严肃风险时句尾不使用玩笑",
+        "原文没有停顿符号时不推测语音停顿", "对方问题需要直答时不故意转话题", "失败状态不维持过强兴奋",
+        "关系未知时不用亲密称呼", "无法保留语尾时优先保留互动功能", "正式文档正文不套角色口语",
+        "重复会造成歧义时只保留一次", "事实尚未确认时不作绝对判断", "用户明确单人执行时不虚构共同操作",
+    )
+    voice_conditions = (
+        "低风险日常和普通协作", "需要解释后继续追问", "邀请、拒绝和确认场景", "原文含省略或转折标记时",
+        "对方刚给出具体事件时", "成功、日常与轻松等待时", "关系信息已有来源支持时", "输出语言不同于原文时",
+        "长回复发送前的反模板检查", "强调喜好或行动优先级时", "不同意方案且要保留事实时", "希望与熟悉同伴共同推进时",
+    )
     for index in range(1, voice_count + 1):
         first = ((index - 1) * 2 % evidence_count) + 1
         second = (first % evidence_count) + 1
@@ -210,10 +274,10 @@ def build_fixture(
             f"""### VOICE-{index:02d} | 测试声纹 {index}
 
 - 层级：{voice_layers[index - 1]}
-- 规律：从两处原文观察得到的声纹规律 {index}
+- 规律：{voice_patterns[index - 1]}
 - 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
-- 反证或边界：边界观察 {index}
-- 适用条件：条件 {index}
+- 反证或边界：{voice_boundaries[index - 1]}
+- 适用条件：{voice_conditions[index - 1]}
 - 置信度：高
 """
         )
@@ -229,12 +293,12 @@ def build_fixture(
             f"""### MODE-{index:02d} | 测试模式 {index}
 
 - 情绪：{mode_emotions[(index - 1) % len(mode_emotions)]}
-- 触发：触发条件 {index}
+- 触发：{mode_emotions[(index - 1) % len(mode_emotions)]} 状态由具体事件触发
 - 关系：关系条件 {index}
-- 角色即时反应：即时反应 {index}
-- 语言变化：语言变化 {index}
-- 响应形态：响应形态 {index}
-- 口语节奏：口语节奏 {index}
+- 角色即时反应：先出现 {mode_emotions[(index - 1) % len(mode_emotions)]} 的可观察短反应
+- 语言变化：{mode_emotions[(index - 1) % len(mode_emotions)]} 时调整句长和追问强度
+- 响应形态：采用 {mode_emotions[(index - 1) % len(mode_emotions)]} 对应的不同组织形态
+- 口语节奏：保留 {mode_emotions[(index - 1) % len(mode_emotions)]} 的断句与转折位置
 - 禁止结构：禁止固定骨架 {index}
 - 行动倾向：行动倾向 {index}
 - 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
@@ -245,16 +309,20 @@ def build_fixture(
 
     anti_count = 8 if persona_type in {"existing-character", "real-person-simulation"} else 6
     anti_entries = []
+    anti_modes = ("AI书面连接", "客服完整安抚", "项目经理任务分派", "机械三段式", "过度交还选择权", "伪口语填充", "单一情绪句型", "技术名词堆叠")
+    anti_signals = ("综合来看 / 基于以上", "感谢理解 / 为你服务", "推进计划 / 确认范围", "首先 / 其次 / 最后", "由你决定 / 你来选择", "嗯嗯 / 搭档呀", "固定短反应 / 固定追问", "能力边界 / 流程闭环")
+    anti_reasons = ("抹掉即时偏向", "把关系写成服务关系", "把合作写成任务管理", "每次使用同一答题骨架", "角色主动性被反复移交", "语气词没有原文结构支持", "不同情绪无法区分", "具体反应被抽象术语覆盖")
+    anti_alternatives = ("直接反应后接具体事实", "用关系证据中的真实回应", "用共同动作替代任务分派", "按触发选择不同响应形态", "给出偏好后保留用户决定", "使用省略和自我修正等证据", "切换情绪对应句长与收束", "先说具体对象再说技术事实")
     for index in range(1, anti_count + 1):
         first = ((index - 1) * 2 % evidence_count) + 1
         second = (first % evidence_count) + 1
         anti_entries.append(
             f"""### ANTI-{index:02d} | 测试反角色 {index}
 
-- 模式：AI 书面腔 {index}
-- 检测信号：通用套话{index} / 机械结构{index}
-- 为什么不像：与角色互动证据不同 {index}
-- 角色替代结构：使用原文支持的口语结构 {index}
+- 模式：{anti_modes[index - 1]}
+- 检测信号：{anti_signals[index - 1]}
+- 为什么不像：{anti_reasons[index - 1]}
+- 角色替代结构：{anti_alternatives[index - 1]}
 - 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
 - 适用场景：测试场景 {index}
 - 例外：精确技术事实保留 {index}
@@ -270,13 +338,13 @@ def build_fixture(
         scene_entries.append(
             f"""## {scene_id} | 测试场景
 
-- 触发：场景触发 {index}
-- 原作互动功能：原作功能 {index}
-- 角色即时反应：角色反应 {index}
+- 触发：{scene_id} 场景出现可观察事件
+- 原作互动功能：使用 {scene_id} 对应的互动功能
+- 角色即时反应：先产生 {scene_id} 场景特有的反应
 - 候选原文卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
 - 候选声纹规律：VOICE-{voice_id:02d}
-- 事实嵌入方式：事实嵌入 {index}
-- 禁止退化：禁止通用助手表达 {index}
+- 事实嵌入方式：把事实放入 {scene_id} 场景的反应之后
+- 禁止退化：避免 {scene_id} 场景退化成统一助手模板
 """
         )
     write_text(target / "references" / "04-工作场景迁移.md", "# 测试角色场景迁移\n\n" + "\n".join(scene_entries))
@@ -287,6 +355,7 @@ def build_fixture(
         source_types = ("用户补充",)
     source_entries = []
     for index, source_type in enumerate(source_types, start=1):
+        support_value = f"TESTROLE-{index:04d}" if source_type in {"原作明确", "用户补充"} else f"角色设定结论 {index}"
         source_entries.append(
             f"""## SRC-{index:04d}
 
@@ -298,7 +367,7 @@ def build_fixture(
 - 可用范围：仅测试
 - 内容摘要：测试摘要
 - 可靠性：已核对
-- 支持的结论或卡片：TESTROLE-{index:04d}
+- 支持的结论或卡片：{support_value}
 """
         )
     if research_status == "已穷尽":
@@ -346,6 +415,75 @@ def build_fixture(
         "# 测试角色来源索引\n\n" + coverage + "\n" + "\n".join(source_entries),
     )
 
+    bio_count = 12 if persona_type in {"existing-character", "real-person-simulation"} else 8
+    bio_categories = (
+        "identity", "gender", "background", "timeline", "relationship", "ability", "preference", "worldview",
+        "faq", "relationship", "timeline", "ability",
+    )
+    bio_topics = (
+        "姓名与身份", "性别身份与称谓", "成长背景", "首次重要经历", "与同伴的关系", "擅长的能力",
+        "日常偏好", "看待规则的方式", "为何参与当前行动", "称呼熟悉同伴", "关键转折后的变化", "能力限制",
+    )
+    bio_facts = (
+        "公开身份是测试角色并使用该姓名", "性别身份为女性并使用资料明确的女性称谓", "成长经历解释了当前的行动倾向",
+        "第一次关键事件改变了任务方向", "把主要同伴视为可共同决定的人", "擅长观察局面并快速采取行动",
+        "空闲时更喜欢轻松的日常活动", "规则与具体的人冲突时会重新判断", "参与行动是为了保护眼前的重要对象",
+        "对熟悉同伴采用较近的称呼", "关键转折后更愿意表达自己的判断", "能力有明确范围且不能解决所有问题",
+    )
+    bio_perspectives = (
+        "用第一人称直接报出姓名和当前身份", "采用资料中的女性自称与称谓，不额外套用刻板语气", "只承认来源明确的成长经历",
+        "按当时阶段讲述事件而不提前剧透", "说明重视对方但不虚构额外亲密关系", "可以自信说明擅长事项并承认限制",
+        "用自然口吻表达喜欢而非列偏好表", "先说自己的判断再解释规则位置", "说明自己的主动选择和保护对象",
+        "沿用资料中的称呼与关系距离", "区分转折前后的自己", "明确说出做不到的部分",
+    )
+    bio_questions = (
+        "你是谁/你叫什么", "你的性别/怎么称呼你/用什么代词", "你从哪里来/你的过去", "你第一次经历什么/早期经历",
+        "你和同伴什么关系/你怎么看她", "你会什么/你擅长什么", "你喜欢什么/平时做什么", "你怎么看规则/为什么不服从",
+        "你为什么做这件事/你的目标", "你怎么称呼同伴/你们熟吗", "后来你变了吗/哪个事件改变你", "你有什么弱点/你做不到什么",
+    )
+    bio_boundaries = (
+        "不同版本名称不一致时注明版本", "没有来源的性别表达差异不补写", "没有来源的童年细节不补写",
+        "回答按用户允许的剧透范围", "不把合作关系自动写成恋爱关系", "不得把作品能力扩展成现实工具能力",
+        "不从单句对白推导永久偏好", "只陈述跨场景可见的价值判断", "不把模型解释冒充角色亲口设定",
+        "关系阶段变化时注明时间点", "不同作品阶段分开回答", "精确能力上限未知时说明未知",
+    )
+    bio_entries = []
+    for index in range(1, bio_count + 1):
+        source_index = ((index - 1) % len(source_types)) + 1
+        bio_entries.append(
+            f"""### BIO-{index:02d} | {bio_topics[index - 1]}
+
+- 类别：{bio_categories[index - 1]}
+- 主题：{bio_topics[index - 1]}
+- 事实：{bio_facts[index - 1]}
+- 角色视角回答要点：{bio_perspectives[index - 1]}
+- 适用问题：{bio_questions[index - 1]}
+- 时间或版本：测试作品阶段 {index}
+- 来源：SRC-{source_index:04d}
+- 置信度：高
+- 边界：{bio_boundaries[index - 1]}
+"""
+        )
+    write_text(
+        target / "references" / "10-人物背景档案.md",
+        """# 测试角色人物背景档案
+
+## 常驻身份基线
+
+- 姓名与原名：测试角色 / Test Role
+- 性别身份：女
+- 性别相关称谓与代词：第一人称“我”，第三人称“她”
+- 年龄或生命阶段：测试作品青年阶段
+- 物种或存在类型：人类
+- 社会身份或职业：测试行动成员
+- 所属或阵营：测试组织
+- 当前时间点或版本：测试作品正式版
+- 自我认知：把自己视为会主动帮助同伴的行动者
+- 基线来源：SRC-0001
+
+""" + "\n".join(bio_entries),
+    )
+
 
 class PersonaToolTests(unittest.TestCase):
     def test_init_copies_selector_and_draft_validates(self) -> None:
@@ -370,6 +508,7 @@ class PersonaToolTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertTrue((role / "scripts" / "select_dialogues.py").is_file())
+            self.assertTrue((role / "references" / "10-人物背景档案.md").is_file())
             draft = persona_tool.validate_skill(role, "draft")
             self.assertTrue(draft["valid"], draft["issues"])
 
@@ -389,6 +528,9 @@ class PersonaToolTests(unittest.TestCase):
             self.assertEqual(result["metrics"]["core_rules"], 12)
             self.assertEqual(result["metrics"]["core_layers"], 10)
             self.assertGreaterEqual(result["metrics"]["core_evidence_cards"], 20)
+            self.assertEqual(result["metrics"]["biography_entries"], 12)
+            self.assertGreaterEqual(result["metrics"]["biography_categories"], 6)
+            self.assertTrue(result["metrics"]["biography_baseline_complete"])
 
             selector = role / "scripts" / "select_dialogues.py"
             command = [
@@ -425,6 +567,11 @@ class PersonaToolTests(unittest.TestCase):
             self.assertGreaterEqual(len(first["related_rules"]["modes"]), 1)
             self.assertGreaterEqual(len(first["related_rules"]["anti"]), 1)
             self.assertIn(first["retrieval"]["confidence"], {"high", "medium"})
+            self.assertIn(first["retrieval"]["match_confidence"], {"high", "medium"})
+            self.assertIn(first["retrieval"]["evidence_confidence"], {"high", "medium"})
+            self.assertTrue(
+                all(item["evidence_confidence"] in {"high", "medium"} for item in first["selected"])
+            )
             selected_ids = {item["card_id"] for item in first["selected"]}
             for group in first["related_rules"].values():
                 self.assertTrue(all(set(rule["matched_card_ids"]) <= selected_ids for rule in group))
@@ -589,6 +736,155 @@ class PersonaToolTests(unittest.TestCase):
             self.assertFalse(result["valid"])
             self.assertIn("dialogue.annotation_boilerplate", codes)
 
+    def test_semantic_rule_boilerplate_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "semantic-boilerplate"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            replacements = {
+                "01-角色核心.md": ("结论", "可观察行为", "适用条件"),
+                "02-语言声纹.md": ("规律", "反证或边界", "适用条件"),
+                "03-情绪与关系.md": ("触发", "角色即时反应", "语言变化", "响应形态", "口语节奏"),
+                "09-反角色对照.md": ("模式", "检测信号", "为什么不像", "角色替代结构"),
+                "04-工作场景迁移.md": ("触发", "原作互动功能", "角色即时反应", "事实嵌入方式", "禁止退化"),
+                "10-人物背景档案.md": ("主题", "事实", "角色视角回答要点", "适用问题", "边界"),
+            }
+            for filename, fields in replacements.items():
+                path = role / "references" / filename
+                text = path.read_text(encoding="utf-8")
+                for field in fields:
+                    text = re.sub(
+                        rf"^- {re.escape(field)}：.+$",
+                        f"- {field}：统一批量生成的模板内容",
+                        text,
+                        flags=re.MULTILINE,
+                    )
+                write_text(path, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertEqual(result["metrics"]["semantic_diversity_failures"], 6)
+            self.assertTrue(
+                {
+                    "core_rule.semantic_boilerplate",
+                    "voice.semantic_boilerplate",
+                    "mode.semantic_boilerplate",
+                    "anti.semantic_boilerplate",
+                    "scene.semantic_boilerplate",
+                    "biography.semantic_boilerplate",
+                }
+                <= codes
+            )
+
+    def test_biography_fact_requires_existing_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "invented-biography"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            biography = role / "references" / "10-人物背景档案.md"
+            text = biography.read_text(encoding="utf-8")
+            write_text(biography, text.replace("- 来源：SRC-0001", "- 来源：SRC-9999", 1))
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("biography.source_invalid", codes)
+
+    def test_biography_baseline_and_gender_category_are_required(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "missing-gender-baseline"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            biography = role / "references" / "10-人物背景档案.md"
+            text = biography.read_text(encoding="utf-8")
+            text = text.replace("- 性别身份：女\n", "", 1)
+            text = text.replace("- 类别：gender", "- 类别：faq", 1)
+            write_text(biography, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("biography.baseline_missing", codes)
+            self.assertIn("biography.identity_coverage_missing", codes)
+
+    def test_source_card_claim_must_match_card_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "false-source-claim"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            source_path = role / "references" / "08-来源索引.md"
+            text = source_path.read_text(encoding="utf-8")
+            write_text(
+                source_path,
+                text.replace(
+                    "- 支持的结论或卡片：TESTROLE-0001",
+                    "- 支持的结论或卡片：TESTROLE-0002",
+                    1,
+                ),
+            )
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("sources.card_claim_mismatch", codes)
+
+    def test_missing_context_conflicts_with_verified_label_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "false-label-evidence"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            library = role / "references" / "06-对白库.md"
+            text = library.read_text(encoding="utf-8")
+            write_text(library, text.replace("- 触发话语：追问触发话语 1", "- 触发话语：上下文缺失", 1))
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("dialogue.label_evidence_conflict", codes)
+
+    def test_selector_downgrades_high_tag_match_with_weak_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "weak-evidence"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            library = role / "references" / "06-对白库.md"
+            text = library.read_text(encoding="utf-8")
+            text = re.sub(
+                r"^- 标签依据：.+$",
+                "- 标签依据：speech_act=合理推导; trigger=缺失; relation=缺失; emotion=合理推导",
+                text,
+                flags=re.MULTILINE,
+            )
+            text = re.sub(r"^- 触发话语：.+$", "- 触发话语：上下文缺失", text, flags=re.MULTILINE)
+            text = re.sub(r"^- 对话对象：.+$", "- 对话对象：未知", text, flags=re.MULTILINE)
+            write_text(library, text)
+            selected = json.loads(
+                subprocess.check_output(
+                    [
+                        sys.executable,
+                        str(role / "scripts" / "select_dialogues.py"),
+                        "--root", str(role),
+                        "--task-state", "failed",
+                        "--user-state", "tired",
+                        "--emotion", "caring",
+                        "--intent", "encourage",
+                        "--speech-act", "encourage",
+                        "--trigger", "failed",
+                        "--risk", "low",
+                        "--language", "zh-CN",
+                        "--format", "json",
+                    ],
+                    text=True,
+                    encoding="utf-8",
+                )
+            )
+            self.assertIn(selected["retrieval"]["match_confidence"], {"high", "medium"})
+            self.assertEqual(selected["retrieval"]["evidence_confidence"], "low")
+            self.assertEqual(selected["retrieval"]["confidence"], "low")
+            self.assertTrue(all(item["evidence_confidence"] == "low" for item in selected["selected"]))
+
+    def test_same_context_self_evaluation_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "self-evaluated"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            cases = role / "references" / "07-验证用例.md"
+            text = cases.read_text(encoding="utf-8")
+            write_text(cases, text.replace("- 评估者标识：隔离评测上下文 A", "- 评估者标识：生成者本人自评", 1))
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("tests.self_evaluation_forbidden", codes)
+
     def test_voice_and_scene_must_reference_verified_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "invented-voice"
@@ -730,6 +1026,11 @@ class PersonaToolTests(unittest.TestCase):
         self.assertIn("对白库禁止加入官方角色介绍", creator)
         self.assertIn("原语言逐字原文", creator)
         self.assertIn("声纹不能由模型自由概括", creator)
+        self.assertIn("人物背景档案", creator)
+        runtime = (ROOT / "assets" / "角色人格模板" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("10-人物背景档案.md", runtime)
+        self.assertIn("用户询问角色个人事实", runtime)
+        self.assertIn("性别相关自称、代词、称谓", runtime)
         self.assertIn("去名盲测", creator)
         self.assertNotIn("官方角色原文", persona_tool.EXACT_CARD_TYPES)
         self.assertNotIn("试用版", creator)
