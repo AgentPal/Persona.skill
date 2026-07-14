@@ -26,6 +26,7 @@ CASE_HEADING_RE = re.compile(r"^##\s+CASE-\d{2}\s+\|", re.MULTILINE)
 SOURCE_HEADING_RE = re.compile(r"^##\s+(SRC-\d{4})\s*$", re.MULTILINE | re.IGNORECASE)
 RESEARCH_HEADING_RE = re.compile(r"^###\s+(RESEARCH-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 VOICE_HEADING_RE = re.compile(r"^###\s+(VOICE-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+MICRO_HEADING_RE = re.compile(r"^###\s+(MICRO-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 MODE_HEADING_RE = re.compile(r"^###\s+(MODE-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 CORE_HEADING_RE = re.compile(r"^###\s+(CORE-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 ANTI_HEADING_RE = re.compile(r"^###\s+(ANTI-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
@@ -132,6 +133,11 @@ REQUIRED_VOICE_LAYERS = {
 }
 MINIMUM_VOICE_LAYERS = {"lexicon", "syntax", "ending", "orality", "interaction", "anti-voice"}
 ALLOWED_VOICE_LAYERS = REQUIRED_VOICE_LAYERS | {"prosody"}
+REQUIRED_MICRO_FIELDS = (
+    "功能", "触发", "即时反应", "开场节奏", "追问或收束", "证据卡", "证据映射",
+    "检索条件", "禁止通用替代", "置信度",
+)
+REQUIRED_MICRO_FUNCTIONS = {"greeting", "acknowledgement", "gratitude", "apology", "surprise", "closing"}
 REQUIRED_MODE_FIELDS = (
     "情绪", "触发", "关系", "角色即时反应", "语言变化", "响应形态", "口语节奏",
     "临场信号", "画面表达", "主动表达", "触发与冷却", "禁止结构", "行动倾向",
@@ -325,8 +331,17 @@ def iter_research_blocks(text: str) -> Iterable[tuple[str, str]]:
 
 def iter_voice_blocks(text: str) -> Iterable[tuple[str, str]]:
     matches = list(VOICE_HEADING_RE.finditer(text))
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+    boundaries = sorted(item.start() for pattern in (VOICE_HEADING_RE, MICRO_HEADING_RE) for item in pattern.finditer(text))
+    for match in matches:
+        end = next((position for position in boundaries if position > match.start()), len(text))
+        yield match.group(1).upper(), text[match.end() : end]
+
+
+def iter_micro_blocks(text: str) -> Iterable[tuple[str, str]]:
+    matches = list(MICRO_HEADING_RE.finditer(text))
+    boundaries = sorted(item.start() for pattern in (VOICE_HEADING_RE, MICRO_HEADING_RE) for item in pattern.finditer(text))
+    for match in matches:
+        end = next((position for position in boundaries if position > match.start()), len(text))
         yield match.group(1).upper(), text[match.end() : end]
 
 
@@ -409,6 +424,13 @@ def parse_evidence_mapping(value: str | None) -> dict[str, str]:
     }
 
 
+def split_mapping_observation(value: str) -> tuple[str, str]:
+    match = re.match(r"^([^=：]+?)(?:[=：](.+))?$", value.strip())
+    if not match:
+        return value.strip(), ""
+    return match.group(1).strip(), (match.group(2) or "").strip()
+
+
 def validate_rule_evidence_mapping(
     issues: list[Issue], rule_id: str, block: str, card_blocks: dict[str, str],
     path: Path, root: Path, level: str, code_prefix: str,
@@ -429,7 +451,8 @@ def validate_rule_evidence_mapping(
             f"{code_prefix}.evidence_mapping_mismatch",
             f"{rule_id} 的证据卡与证据映射不一致：" + "；".join(detail), path, root,
         )
-    for card_id, source_field in mappings.items():
+    for card_id, mapping_value in mappings.items():
+        source_field, observation = split_mapping_observation(mapping_value)
         if source_field not in ALLOWED_EVIDENCE_FIELDS:
             add_issue(
                 issues, "error" if level == "release" else "warning",
@@ -437,6 +460,13 @@ def validate_rule_evidence_mapping(
                 f"{rule_id} 把 {card_id} 映射到无效原始字段：{source_field}", path, root,
             )
             continue
+        if not has_substantive_value(observation) or len(observation) < 4:
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                f"{code_prefix}.evidence_mapping_observation_missing",
+                f"{rule_id} 对 {card_id} 只写了字段名，没有记录该字段中支持结论的具体观察；使用“字段=观察”格式",
+                path, root,
+            )
         card_block = card_blocks.get(card_id)
         if card_block is not None and not has_substantive_value(field_value(card_block, source_field), allow_none=True):
             add_issue(
@@ -592,6 +622,8 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         "voice_rules": 0,
         "voice_layers": 0,
         "voice_evidence_cards": 0,
+        "micro_rules": 0,
+        "micro_functions": 0,
         "anti_rules": 0,
         "anti_evidence_cards": 0,
         "core_rules": 0,
@@ -1274,16 +1306,16 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     cases_text = read_text(cases_path) if cases_path.is_file() else ""
     case_count = len(CASE_HEADING_RE.findall(cases_text))
     metrics["validation_cases"] = case_count
-    if case_count < 22:
+    if case_count < 23:
         add_issue(
             issues,
             "error" if level == "release" else "warning",
             "tests.too_few_cases",
-            f"验证用例仅 {case_count} 个，至少需要 22 个",
+            f"验证用例仅 {case_count} 个，至少需要 23 个",
             cases_path,
             root,
         )
-    required_case_ids = {"CASE-18", "CASE-19", "CASE-20", "CASE-21", "CASE-22"}
+    required_case_ids = {"CASE-18", "CASE-19", "CASE-20", "CASE-21", "CASE-22", "CASE-23"}
     present_case_ids = set(re.findall(r"^##\s+(CASE-\d{2})\s+\|", cases_text, re.MULTILINE))
     missing_fidelity_cases = sorted(required_case_ids - present_case_ids)
     if missing_fidelity_cases:
@@ -1309,6 +1341,11 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         ),
         "CASE-21": ("输入", "背景条目", "固定事实", "角色输出", "追溯记录", "验证状态"),
         "CASE-22": ("输入", "背景条目", "未知边界", "角色输出", "追溯记录", "验证状态"),
+        "CASE-23": (
+            "样本数", "检查器", "检查结果", "重复流程骨架数", "重复开场骨架数",
+            "同一回答形状样本数", "追问收尾样本数", "长度与句数异常集中",
+            "低生成准备度样本数", "原始记录位置", "验证状态",
+        ),
     }
     for case_id, fields in fidelity_case_fields.items():
         block = case_blocks.get(case_id, "")
@@ -1363,6 +1400,14 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     retrieval_correct = integer_field(case_blocks.get("CASE-20", ""), "召回相关数")
     mapping_samples = integer_field(case_blocks.get("CASE-20", ""), "证据映射抽查数")
     mapping_correct = integer_field(case_blocks.get("CASE-20", ""), "证据映射成立数")
+    batch_samples = integer_field(case_blocks.get("CASE-23", ""), "样本数")
+    repeated_workflow = integer_field(case_blocks.get("CASE-23", ""), "重复流程骨架数")
+    repeated_opening = integer_field(case_blocks.get("CASE-23", ""), "重复开场骨架数")
+    repeated_shape = integer_field(case_blocks.get("CASE-23", ""), "同一回答形状样本数")
+    question_closures = integer_field(case_blocks.get("CASE-23", ""), "追问收尾样本数")
+    uniform_structure = (field_value(case_blocks.get("CASE-23", ""), "长度与句数异常集中") or "").strip()
+    low_readiness = integer_field(case_blocks.get("CASE-23", ""), "低生成准备度样本数")
+    batch_checker_status = (field_value(case_blocks.get("CASE-23", ""), "检查结果") or "").strip().lower()
     fidelity_thresholds = (
         (blind_samples is not None and blind_samples >= 12, "tests.blind_samples_low", "CASE-18 去名盲测至少需要 12 个样本"),
         (blind_correct is not None and blind_correct >= 10 and blind_samples is not None and blind_correct <= blind_samples, "tests.blind_correct_low", "CASE-18 至少需要正确识别 10 个样本，且不能超过样本数"),
@@ -1373,6 +1418,18 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         (retrieval_correct is not None and trace_samples is not None and retrieval_correct <= trace_samples and retrieval_correct * 100 >= trace_samples * 80, "tests.retrieval_rate_low", "CASE-20 召回相关率必须至少 80%"),
         (mapping_samples is not None and mapping_samples >= 12, "tests.evidence_mapping_samples_low", "CASE-20 至少独立抽查 12 条规则证据映射"),
         (mapping_correct is not None and mapping_samples is not None and mapping_correct <= mapping_samples and mapping_correct * 100 >= mapping_samples * 80, "tests.evidence_mapping_rate_low", "CASE-20 规则证据映射语义成立率必须至少 80%"),
+        (batch_samples is not None and batch_samples >= 8, "tests.batch_samples_low", "CASE-23 批量结构退化检查至少需要 8 个样本"),
+        (batch_checker_status == "pass", "tests.batch_checker_not_passed", "CASE-23 的批量回复检查器结果必须是 pass"),
+        (repeated_workflow is not None and repeated_workflow <= 1, "tests.batch_workflow_repeated", "CASE-23 重复流程骨架最多允许 1 个"),
+        (repeated_opening is not None and repeated_opening <= 1, "tests.batch_opening_repeated", "CASE-23 重复开场骨架最多允许 1 个"),
+        (repeated_shape is not None and repeated_shape <= 3, "tests.batch_shape_repeated", "CASE-23 同一回答形状最多允许出现在 3 个样本中"),
+        (
+            question_closures is not None and batch_samples is not None and question_closures <= batch_samples
+            and question_closures * 100 < batch_samples * 70,
+            "tests.batch_question_closure_repeated", "CASE-23 追问收尾不得达到样本的 70%",
+        ),
+        (uniform_structure in {"否", "no", "false"}, "tests.batch_uniform_structure", "CASE-23 长度与句数不得异常集中"),
+        (low_readiness == 0, "tests.generation_readiness_low", "CASE-23 不允许把生成准备度为 low 的样本计作角色还原通过"),
     )
     for passed, code, message in fidelity_thresholds:
         if not passed:
@@ -1823,6 +1880,72 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             root,
         )
 
+    micro_blocks = list(iter_micro_blocks(voice_text))
+    duplicate_micro_ids = sorted(
+        micro_id for micro_id, count in Counter(item[0] for item in micro_blocks).items() if count > 1
+    )
+    if duplicate_micro_ids:
+        add_issue(
+            issues, "error", "micro.duplicate_id", "微互动编号重复：" + ", ".join(duplicate_micro_ids), voice_path, root,
+        )
+    micro_functions: set[str] = set()
+    for micro_id, block in micro_blocks:
+        for field in REQUIRED_MICRO_FIELDS:
+            if not has_substantive_value(field_value(block, field)):
+                add_issue(
+                    issues, "error" if level == "release" else "warning",
+                    "micro.field_missing", f"{micro_id} 缺少可用字段：{field}", voice_path, root,
+                )
+        function = (field_value(block, "功能") or "").strip().lower()
+        if function:
+            micro_functions.add(function)
+        evidence_ids = set(re.findall(r"\b[A-Z0-9][A-Z0-9-]*-\d{4}\b", field_value(block, "证据卡") or ""))
+        if len(evidence_ids) < 2:
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "micro.evidence_too_few", f"{micro_id} 至少需要两张不同证据单元的表达卡", voice_path, root,
+            )
+        elif len({card_scene_ids.get(card_id) for card_id in evidence_ids if card_scene_ids.get(card_id)}) < 2:
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "micro.evidence_same_unit", f"{micro_id} 的证据卡必须来自至少两个不同证据单元", voice_path, root,
+            )
+        unknown_evidence = sorted(evidence_ids - evidence_card_ids)
+        if unknown_evidence:
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "micro.evidence_invalid",
+                f"{micro_id} 引用了不存在、未核验或非原始语言的证据卡：" + ", ".join(unknown_evidence),
+                voice_path, root,
+            )
+        validate_rule_evidence_mapping(
+            issues, micro_id, block, card_blocks_by_id, voice_path, root, level, "micro"
+        )
+    metrics["micro_rules"] = len(micro_blocks)
+    metrics["micro_functions"] = len(micro_functions)
+    metrics["semantic_diversity_failures"] += add_semantic_diversity_issues(
+        issues,
+        micro_blocks,
+        ("即时反应", "开场节奏", "追问或收束", "禁止通用替代"),
+        "micro.semantic_boilerplate",
+        "微互动规则",
+        voice_path,
+        root,
+        level,
+    )
+    missing_micro_functions = sorted(REQUIRED_MICRO_FUNCTIONS - micro_functions)
+    if level == "release" and len(micro_blocks) < len(REQUIRED_MICRO_FUNCTIONS):
+        add_issue(
+            issues, target_severity, "micro.rules_low",
+            f"微互动规则仅 {len(micro_blocks)} 条，正式版至少需要 {len(REQUIRED_MICRO_FUNCTIONS)} 条",
+            voice_path, root,
+        )
+    if level == "release" and missing_micro_functions:
+        add_issue(
+            issues, target_severity, "micro.functions_missing",
+            "微互动缺少基础功能：" + ", ".join(missing_micro_functions), voice_path, root,
+        )
+
     mode_path = root / "references" / "03-情绪与关系.md"
     mode_text = read_text(mode_path) if mode_path.is_file() else ""
     mode_blocks = list(iter_mode_blocks(mode_text))
@@ -2182,6 +2305,8 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and len(voice_blocks) >= 8
             and MINIMUM_VOICE_LAYERS.issubset(voice_layers)
             and len(voice_evidence_ids & evidence_card_ids) >= 12
+            and len(micro_blocks) >= 6
+            and REQUIRED_MICRO_FUNCTIONS.issubset(micro_functions)
             and len(mode_blocks) >= 8
             and len(mode_dimensions) >= 6
             and len(anti_blocks) >= 6
@@ -2189,7 +2314,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and len(bio_blocks) >= 8
             and len(bio_categories) >= 4
             and metrics["biography_baseline_complete"]
-            and case_count >= 22
+            and case_count >= 23
             and metrics["semantic_diversity_failures"] == 0
         )
     elif persona_type == "real-person-simulation":
@@ -2207,6 +2332,8 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and len(voice_blocks) >= 8
             and MINIMUM_VOICE_LAYERS.issubset(voice_layers)
             and len(voice_evidence_ids & evidence_card_ids) >= 12
+            and len(micro_blocks) >= 6
+            and REQUIRED_MICRO_FUNCTIONS.issubset(micro_functions)
             and len(mode_blocks) >= 8
             and len(mode_dimensions) >= 6
             and len(anti_blocks) >= 6
@@ -2214,6 +2341,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and len(bio_blocks) >= 8
             and len(bio_categories) >= 4
             and metrics["biography_baseline_complete"]
+            and case_count >= 23
             and metrics["semantic_diversity_failures"] == 0
         )
     elif persona_type in {"original-persona", "composite-original"}:
@@ -2222,11 +2350,14 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and len(dimensions) >= 8
             and len(core_blocks) >= 8
             and len(voice_blocks) >= 8
+            and len(micro_blocks) >= 6
+            and REQUIRED_MICRO_FUNCTIONS.issubset(micro_functions)
             and len(mode_blocks) >= 8
             and len(anti_blocks) >= 6
             and len(bio_blocks) >= 8
             and len(bio_categories) >= 4
             and metrics["biography_baseline_complete"]
+            and case_count >= 23
             and metrics["semantic_diversity_failures"] == 0
         )
     if target_met:

@@ -61,6 +61,7 @@ def card_text(
     positions = ("发起", "接话", "追问", "打断", "跟进", "收束", "自言自语", "接话后转折")
     initiatives = ("主动发起", "回应", "跟进", "打断", "收束", "自我修正", "回应后接手", "主动回访")
     speech_act = intents[(index - 1) % 8]
+    speech_act_tags = f"{speech_act}/greet" if index == 1 else speech_act
     emotion = emotions[(index - 1) % 8]
     if context_type in {"演讲发言", "博客文章", "社交媒体", "书信"}:
         completeness = "语境充分"
@@ -82,7 +83,7 @@ def card_text(
         target = "熟悉的同伴"
     return f"""## {card_id}
 
-- 原作检索标签：speech_act={speech_act}; trigger={task_state}; interaction={speech_act}; position=reply; relation=familiar; emotion={emotion}; initiative=response
+- 原作检索标签：speech_act={speech_act_tags}; trigger={task_state}; interaction={speech_act_tags}; position=reply; relation=familiar; emotion={emotion}; initiative=response
 - 标签依据：speech_act=原文可见; trigger=上下文可见; interaction=上下文可见; position=上下文可见; relation=上下文可见; emotion=原文可见; initiative=上下文可见
 - 卡片类型：{card_type}
 - 原文：{'原作逐字原句' if existing else '原创规范原句'} {index}
@@ -215,6 +216,20 @@ def build_fixture(
 - 追溯记录：BIO-04、BIO-{biography_case_last:02d}、SRC-0001、CORE-01、VOICE-01
 - 验证状态：通过
 """,
+        "CASE-23": """## CASE-23 | 批量结构退化与生成准备度
+
+- 样本数：10
+- 检查器：scripts/check_response.py --batch-file tests/responses.json
+- 检查结果：pass
+- 重复流程骨架数：1
+- 重复开场骨架数：1
+- 同一回答形状样本数：3
+- 追问收尾样本数：4
+- 长度与句数异常集中：否
+- 低生成准备度样本数：0
+- 原始记录位置：tests/batch-response-record-d
+- 验证状态：通过
+""",
     }
     for case_id, replacement in fidelity_cases.items():
         cases_text = re.sub(
@@ -283,7 +298,7 @@ def build_fixture(
 - 结论：{core_conclusions[index - 1]}
 - 可观察行为：{core_behaviors[index - 1]}
 - 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
-- 证据映射：TESTROLE-{first:04d}=>角色即时反应；TESTROLE-{second:04d}=>互动功能
+- 证据映射：TESTROLE-{first:04d}=>角色即时反应={core_behaviors[index - 1]}；TESTROLE-{second:04d}=>互动功能={core_conclusions[index - 1]}
 - 检索条件：speech_act={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}; trigger={task_states[(first - 1) % 8]}/{task_states[(second - 1) % 8]}; interaction={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}
 - 其他来源：SRC-0001
 - 反证或边界：核心边界 {index}
@@ -328,14 +343,60 @@ def build_fixture(
 - 层级：{voice_layers[index - 1]}
 - 规律：{voice_patterns[index - 1]}
 - 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
-- 证据映射：TESTROLE-{first:04d}=>口语现象；TESTROLE-{second:04d}=>句式与节奏
+- 证据映射：TESTROLE-{first:04d}=>口语现象={voice_patterns[index - 1]}；TESTROLE-{second:04d}=>句式与节奏={voice_conditions[index - 1]}
 - 检索条件：speech_act={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}; trigger={task_states[(first - 1) % 8]}/{task_states[(second - 1) % 8]}; interaction={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}
 - 反证或边界：{voice_boundaries[index - 1]}
 - 适用条件：{voice_conditions[index - 1]}
 - 置信度：高
 """
         )
-    write_text(target / "references" / "02-语言声纹.md", "# 测试角色语言声纹\n\n" + "\n".join(voice_entries))
+    micro_functions = ("greeting", "acknowledgement", "gratitude", "apology", "surprise", "closing")
+    micro_reactions = (
+        "先用角色惯用的见面反应认出对方", "先对刚收到的具体信息作短回应", "先直接接住感谢而不使用客服客套",
+        "先明确承认自己造成的偏差", "先出现短促惊讶再追问触发点", "先回应共同经历再自然收住",
+    )
+    micro_openings = (
+        "短感叹接一句贴近关系的问句", "复述对方最后一个具体词后停顿", "短句接受后轻轻转回对方",
+        "直接认错且不加铺垫", "惊叹短句后接省略或反问", "短句回望当前结果后结束",
+    )
+    micro_closings = (
+        "按关系证据决定是否追问，不默认问今天做什么", "有行动就接住，没有行动就收住", "回应关系而不承诺服务",
+        "说明改正动作后收住", "只追问最具体的异常", "不追加通用随时找我",
+    )
+    micro_anti_generic = (
+        "禁止用你好请问有什么可以帮你代替角色见面反应",
+        "禁止用收到我来处理代替对具体信息的接话",
+        "禁止用不客气很高兴帮助你代替关系回应",
+        "禁止用抱歉给你带来不便代替明确认错",
+        "禁止用这是一个值得关注的问题抹平惊讶",
+        "禁止用还有别的问题吗代替自然结束",
+    )
+    micro_entries = []
+    for index, function in enumerate(micro_functions, start=1):
+        first = index
+        second = (index % evidence_count) + 1
+        first_intent = intents[(first - 1) % len(intents)]
+        if function == "greeting":
+            first_intent = "greet/encourage"
+        micro_entries.append(
+            f"""### MICRO-{index:02d} | 测试微互动 {index}
+
+- 功能：{function}
+- 触发：{function} 对应的短话语
+- 即时反应：{micro_reactions[index - 1]}
+- 开场节奏：{micro_openings[index - 1]}
+- 追问或收束：{micro_closings[index - 1]}
+- 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
+- 证据映射：TESTROLE-{first:04d}=>角色即时反应={micro_reactions[index - 1]}；TESTROLE-{second:04d}=>句式与节奏={micro_openings[index - 1]}
+- 检索条件：speech_act={first_intent}; position=reply; relation=familiar
+- 禁止通用替代：{micro_anti_generic[index - 1]}
+- 置信度：高
+"""
+        )
+    write_text(
+        target / "references" / "02-语言声纹.md",
+        "# 测试角色语言声纹\n\n" + "\n".join(voice_entries + micro_entries),
+    )
 
     mode_count = 12 if persona_type in {"existing-character", "real-person-simulation"} else 8
     mode_emotions = ("cheerful", "caring", "serious", "alert", "calm", "confident", "apologetic", "teasing")
@@ -360,7 +421,7 @@ def build_fixture(
 - 禁止结构：禁止固定骨架 {index}
 - 行动倾向：行动倾向 {index}
 - 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
-- 证据映射：TESTROLE-{first:04d}=>角色即时反应；TESTROLE-{second:04d}=>非语言反应
+- 证据映射：TESTROLE-{first:04d}=>角色即时反应={mode_emotions[(index - 1) % len(mode_emotions)]}即时反应；TESTROLE-{second:04d}=>非语言反应={mode_emotions[(index - 1) % len(mode_emotions)]}非语言变化
 - 检索条件：speech_act={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}; trigger={task_states[(first - 1) % 8]}/{task_states[(second - 1) % 8]}; interaction={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}
 - 反证或边界：模式边界 {index}
 """
@@ -384,7 +445,7 @@ def build_fixture(
 - 为什么不像：{anti_reasons[index - 1]}
 - 角色替代结构：{anti_alternatives[index - 1]}
 - 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
-- 证据映射：TESTROLE-{first:04d}=>句式与节奏；TESTROLE-{second:04d}=>互动功能
+- 证据映射：TESTROLE-{first:04d}=>句式与节奏={anti_alternatives[index - 1]}；TESTROLE-{second:04d}=>互动功能={anti_reasons[index - 1]}
 - 检索条件：speech_act={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}; trigger={task_states[(first - 1) % 8]}/{task_states[(second - 1) % 8]}; interaction={intents[(first - 1) % 8]}/{intents[(second - 1) % 8]}
 - 适用场景：测试场景 {index}
 - 例外：精确技术事实保留 {index}
@@ -611,6 +672,8 @@ class PersonaToolTests(unittest.TestCase):
             self.assertEqual(result["metrics"]["biography_entries"], 12)
             self.assertGreaterEqual(result["metrics"]["biography_categories"], 6)
             self.assertTrue(result["metrics"]["biography_baseline_complete"])
+            self.assertEqual(result["metrics"]["micro_rules"], 6)
+            self.assertEqual(result["metrics"]["micro_functions"], 6)
 
             selector = role / "scripts" / "select_dialogues.py"
             command = [
@@ -670,6 +733,8 @@ class PersonaToolTests(unittest.TestCase):
             self.assertEqual(first["delivery_guidance"]["presence_status"], "due")
             self.assertEqual(first["delivery_guidance"]["initiative_status"], "due")
             self.assertEqual(first["delivery_guidance"]["max_presence_beats"], 1)
+            self.assertIn(first["composition_guidance"]["generation_readiness"], {"high", "medium"})
+            self.assertTrue(first["retrieval"]["scope_note"])
 
             excluded = first["selected"][0]["card_id"]
             second = json.loads(
@@ -701,6 +766,48 @@ class PersonaToolTests(unittest.TestCase):
             self.assertEqual(high_risk["work_route"]["scene_id"], "risk")
             self.assertEqual(high_risk["delivery_guidance"]["presence_status"], "serious-only")
             self.assertTrue(all(item["evidence_confidence"] in {"high", "medium"} for item in high_risk["selected"]))
+
+            micro = json.loads(
+                subprocess.check_output(
+                    [
+                        sys.executable, str(selector), "--root", str(role),
+                        "--speech-act", "encourage", "--trigger", "start",
+                        "--interaction", "encourage", "--position", "reply",
+                        "--relation", "familiar", "--micro-function", "greeting",
+                        "--last-user-focus", "你好", "--open-thread", "初次见面",
+                        "--previous-shape", "question",
+                        "--limit", "1", "--format", "json",
+                    ],
+                    text=True,
+                    encoding="utf-8",
+                )
+            )
+            self.assertEqual(len(micro["selected"]), 1)
+            self.assertGreaterEqual(len(micro["related_rules"]["micro"]), 1)
+            self.assertEqual(micro["composition_guidance"]["generation_readiness"], "high")
+            self.assertGreaterEqual(len(micro["composition_guidance"]["style_exemplars"]), 2)
+            continuity = micro["delivery_guidance"]["conversation_continuity"]
+            self.assertTrue(continuity["must_react_to_visible_focus"])
+            self.assertTrue(continuity["must_continue_open_thread"])
+            self.assertTrue(continuity["avoid_repeating_previous_shape"])
+            self.assertTrue(continuity["natural_stop_allowed"])
+            micro_markdown = subprocess.check_output(
+                [
+                    sys.executable, str(selector), "--root", str(role),
+                    "--speech-act", "encourage", "--trigger", "start",
+                    "--interaction", "encourage", "--position", "reply",
+                    "--relation", "familiar", "--micro-function", "greeting",
+                    "--last-user-focus", "你好", "--open-thread", "初次见面",
+                    "--previous-shape", "question", "--limit", "1",
+                ],
+                text=True,
+                encoding="utf-8",
+            )
+            self.assertIn("本轮必须接住：你好", micro_markdown)
+            self.assertIn("本轮必须延续：初次见面", micro_markdown)
+            self.assertIn("本轮避免重复形状：question", micro_markdown)
+            self.assertIn("允许自然收束：是", micro_markdown)
+            self.assertIn("跨证据单元风格支持（不是当前场景召回）", micro_markdown)
 
     def test_novel_character_releases_with_narrative_evidence_units(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1008,7 +1115,7 @@ class PersonaToolTests(unittest.TestCase):
             core = role / "references" / "01-角色核心.md"
             text = core.read_text(encoding="utf-8")
             text = text.replace(
-                "- 证据映射：TESTROLE-0001=>角色即时反应；TESTROLE-0002=>互动功能",
+                "- 证据映射：TESTROLE-0001=>角色即时反应=先阻止危险动作再解释原因；TESTROLE-0002=>互动功能=遇到危险时把人的安全放在规则之前",
                 "- 证据映射：TESTROLE-0001=>不存在字段",
                 1,
             )
@@ -1017,6 +1124,22 @@ class PersonaToolTests(unittest.TestCase):
             codes = {issue["code"] for issue in result["issues"]}
             self.assertIn("core_rule.evidence_mapping_mismatch", codes)
             self.assertIn("core_rule.evidence_mapping_field_invalid", codes)
+
+    def test_rule_evidence_mapping_requires_concrete_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "field-only-evidence-map"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            core = role / "references" / "01-角色核心.md"
+            text = core.read_text(encoding="utf-8")
+            text = text.replace(
+                "TESTROLE-0001=>角色即时反应=先阻止危险动作再解释原因",
+                "TESTROLE-0001=>角色即时反应",
+                1,
+            )
+            write_text(core, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertIn("core_rule.evidence_mapping_observation_missing", codes)
 
     def test_selector_downgrades_high_tag_match_with_weak_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1152,6 +1275,22 @@ class PersonaToolTests(unittest.TestCase):
             self.assertIn("tests.fidelity_not_passed", codes)
             self.assertIn("tests.blind_correct_low", codes)
 
+    def test_batch_fidelity_rejects_uniform_shape_and_question_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "uniform-batch-role"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            cases_path = role / "references" / "07-验证用例.md"
+            text = cases_path.read_text(encoding="utf-8")
+            text = text.replace("- 同一回答形状样本数：3", "- 同一回答形状样本数：7", 1)
+            text = text.replace("- 追问收尾样本数：4", "- 追问收尾样本数：8", 1)
+            text = text.replace("- 长度与句数异常集中：否", "- 长度与句数异常集中：是", 1)
+            write_text(cases_path, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertIn("tests.batch_shape_repeated", codes)
+            self.assertIn("tests.batch_question_closure_repeated", codes)
+            self.assertIn("tests.batch_uniform_structure", codes)
+
     def test_response_checker_flags_ai_and_project_manager_tone(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "tone-role"
@@ -1205,6 +1344,61 @@ class PersonaToolTests(unittest.TestCase):
                     encoding="utf-8",
                 )
             )
+            consulting = json.loads(
+                subprocess.check_output(
+                    [
+                        sys.executable,
+                        str(checker),
+                        "--root", str(role),
+                        "--text", "做网站啊，挺好。先别急着铺一大堆页面：它是给谁用的，对方进来第一件事要完成什么？这两个定下来，我们就能做出第一版。",
+                    ],
+                    text=True,
+                    encoding="utf-8",
+                )
+            )
+            batch_path = role / "tests" / "responses.json"
+            batch_path.parent.mkdir(parents=True, exist_ok=True)
+            write_text(
+                batch_path,
+                json.dumps(
+                    [
+                        "先别急着做页面。先把目标定下来，我们就能继续。",
+                        "还没结束。先看错误日志，我们从第一条开始。",
+                        "这次我理解反了。我先改需求，再重新整理。",
+                        "方案你定了。先确认代价，然后我们推进。",
+                        "做得好。先验收，再发布，我们继续。",
+                    ],
+                    ensure_ascii=False,
+                ),
+            )
+            batch = json.loads(
+                subprocess.check_output(
+                    [sys.executable, str(checker), "--root", str(role), "--batch-file", str(batch_path)],
+                    text=True,
+                    encoding="utf-8",
+                )
+            )
+            uniform_path = role / "tests" / "uniform-responses.json"
+            write_text(
+                uniform_path,
+                json.dumps(
+                    [
+                        "这块你最想改成什么样？",
+                        "这个结果你现在满意吗？",
+                        "这里你更偏向哪一种呢？",
+                        "这一段你希望继续保留吗？",
+                        "这次你想先看哪个部分？",
+                    ],
+                    ensure_ascii=False,
+                ),
+            )
+            uniform = json.loads(
+                subprocess.check_output(
+                    [sys.executable, str(checker), "--root", str(role), "--batch-file", str(uniform_path)],
+                    text=True,
+                    encoding="utf-8",
+                )
+            )
             self.assertEqual(generic["status"], "fail")
             self.assertGreaterEqual(generic["ai_tone_score"], 60)
             self.assertEqual(spoken["status"], "pass")
@@ -1215,6 +1409,14 @@ class PersonaToolTests(unittest.TestCase):
             self.assertEqual(fake_presence["status"], "fail")
             self.assertIn("unverified_sensory_claim", fake_codes)
             self.assertIn("stage_direction_density", fake_codes)
+            self.assertIn(consulting["status"], {"review", "fail"})
+            self.assertIn("generic_consulting_frame", {item["code"] for item in consulting["findings"]})
+            self.assertEqual(batch["status"], "fail")
+            self.assertIn("batch_workflow_skeleton_repeated", {item["code"] for item in batch["findings"]})
+            uniform_codes = {item["code"] for item in uniform["findings"]}
+            self.assertEqual(uniform["status"], "fail")
+            self.assertIn("batch_question_closure_repeated", uniform_codes)
+            self.assertIn("batch_response_shape_repeated", uniform_codes)
 
     def test_evidence_mapping_audit_is_independent_and_meets_threshold(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

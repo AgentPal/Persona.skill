@@ -15,7 +15,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 CARD_HEADING_RE = re.compile(
     r"^##\s+([A-Z0-9][A-Z0-9-]*-\d{4})\s*$", re.MULTILINE | re.IGNORECASE
 )
-RULE_HEADING_RE = re.compile(r"^###\s+((?:CORE|VOICE|MODE|ANTI)-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+RULE_HEADING_RE = re.compile(r"^###\s+((?:CORE|VOICE|MICRO|MODE|ANTI)-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 SCENE_HEADING_RE = re.compile(r"^##\s+([a-z][a-z-]*)\s+\|", re.MULTILINE)
 TAG_RE = re.compile(r"\b([a-z_]+)\s*=\s*([^;；]+)", re.IGNORECASE)
 MAPPING_RE = re.compile(r"\b([A-Z0-9][A-Z0-9-]*-\d{4})\s*=>\s*([^;；]+)", re.IGNORECASE)
@@ -126,6 +126,13 @@ def parse_evidence_mapping(block: str) -> Dict[str, str]:
     return {card_id.upper(): source_field.strip() for card_id, source_field in MAPPING_RE.findall(field_value(block, "证据映射"))}
 
 
+def split_mapping_observation(value: str) -> Tuple[str, str]:
+    match = re.match(r"^([^=：]+?)(?:[=：](.+))?$", value.strip())
+    if not match:
+        return value.strip(), ""
+    return match.group(1).strip(), (match.group(2) or "").strip()
+
+
 def context_is_missing(value: str) -> bool:
     normalized = value.strip().lower()
     return not normalized or any(
@@ -230,6 +237,7 @@ def effective_query(args: argparse.Namespace, route: WorkRoute) -> Dict[str, str
         else:
             result[key] = ""
     result["source_language"] = args.source_language
+    result["micro_function"] = args.micro_function.strip().lower()
     return result
 
 
@@ -374,18 +382,26 @@ def related_rules(
     selected_levels = {item.card.card_id: item.evidence_level for item in selected}
     selected_ids = set(selected_levels)
     references = {
-        "core": root / "references" / "01-角色核心.md",
-        "voice": root / "references" / "02-语言声纹.md",
-        "modes": root / "references" / "03-情绪与关系.md",
-        "anti": root / "references" / "09-反角色对照.md",
+        "core": (root / "references" / "01-角色核心.md", "CORE-"),
+        "voice": (root / "references" / "02-语言声纹.md", "VOICE-"),
+        "micro": (root / "references" / "02-语言声纹.md", "MICRO-"),
+        "modes": (root / "references" / "03-情绪与关系.md", "MODE-"),
+        "anti": (root / "references" / "09-反角色对照.md", "ANTI-"),
     }
     result: Dict[str, List[Dict[str, object]]] = {key: [] for key in references}
     query_has_semantics = any(query.get(key) for key in WEIGHTS)
-    for key, path in references.items():
+    for key, (path, prefix) in references.items():
         if not path.is_file():
+            continue
+        if key == "micro" and not query.get("micro_function"):
             continue
         candidates: List[Tuple[int, str, str, List[str], Dict[str, str], int]] = []
         for rule_id, block in iter_rule_blocks(read_text(path)):
+            if not rule_id.startswith(prefix):
+                continue
+            if key == "micro" and query.get("micro_function"):
+                if (field_value(block, "功能") or "").strip().lower() != query["micro_function"]:
+                    continue
             mappings = parse_evidence_mapping(block)
             matched_ids = sorted(
                 card_id for card_id in selected_ids & set(mappings)
@@ -402,6 +418,7 @@ def related_rules(
             {
                 "rule_id": rule_id,
                 "matched_card_ids": matched_ids,
+                "supporting_card_ids": sorted(mappings),
                 "evidence_mapping": {card_id: mappings[card_id] for card_id in matched_ids},
                 "condition_matches": condition_matches,
                 "content": block,
@@ -411,9 +428,119 @@ def related_rules(
     return result
 
 
+def composition_guidance(
+    cards: Sequence[Card], selected: Sequence[Match], rules: Dict[str, List[Dict[str, object]]],
+    query: Dict[str, str],
+) -> Dict[str, object]:
+    cards_by_id = {card.card_id: card for card in cards}
+    selected_ids = {item.card.card_id for item in selected}
+    support_ids: List[str] = []
+    used_units = {item.card.scene_id for item in selected if item.card.scene_id}
+    for group in ("micro", "voice", "core", "modes"):
+        for rule in rules.get(group, []):
+            for card_id in rule.get("supporting_card_ids", []):
+                card = cards_by_id.get(str(card_id))
+                if not card or card.card_id in selected_ids or card.card_id in support_ids:
+                    continue
+                if card.scene_id and card.scene_id in used_units:
+                    continue
+                support_ids.append(card.card_id)
+                if card.scene_id:
+                    used_units.add(card.scene_id)
+                if len(support_ids) >= 3:
+                    break
+            if len(support_ids) >= 3:
+                break
+        if len(support_ids) >= 3:
+            break
+
+    # A rule may only cite two evidence units. When the current reply needs a
+    # fuller voice sample, add semantically matching verified cards instead of
+    # pretending the single retrieved card proves the whole answer style.
+    if len(support_ids) < 2:
+        query_values = {
+            key: split_values(value) for key, value in query.items()
+            if key in WEIGHTS and value.strip()
+        }
+        candidates: List[Tuple[int, str]] = []
+        for card in cards:
+            if card.card_id in selected_ids or card.card_id in support_ids:
+                continue
+            if card.scene_id and card.scene_id in used_units:
+                continue
+            matched_keys = {
+                key for key, values in query_values.items()
+                if values and values.intersection(card.tags.get(key, set()))
+            }
+            if not matched_keys.intersection(STRONG_KEYS) or len(matched_keys) < 2:
+                continue
+            if card.original_quality not in VERIFIED_ORIGINAL_QUALITIES:
+                continue
+            candidates.append((sum(WEIGHTS[key] for key in matched_keys), card.card_id))
+        for _, card_id in sorted(candidates, key=lambda item: (-item[0], item[1])):
+            card = cards_by_id[card_id]
+            if card.scene_id and card.scene_id in used_units:
+                continue
+            support_ids.append(card_id)
+            if card.scene_id:
+                used_units.add(card.scene_id)
+            if len(support_ids) >= 2:
+                break
+
+    style_exemplars = []
+    for card_id in support_ids:
+        card = cards_by_id[card_id]
+        style_exemplars.append(
+            {
+                "card_id": card_id,
+                "scene_id": card.scene_id,
+                "original_text": card.original_text,
+                "reaction": card.reaction,
+                "oral_observation": field_value(card.block, "口语现象"),
+                "rhythm_observation": field_value(card.block, "句式与节奏"),
+            }
+        )
+
+    micro_required = bool(query.get("micro_function"))
+    slots = {
+        "current_reaction": bool(selected),
+        "micro_interaction": bool(rules.get("micro")) if micro_required else True,
+        "voice_structure": bool(rules.get("voice")),
+        "stance_or_relation": bool(rules.get("core") or rules.get("modes")),
+        "anti_pattern_check": bool(rules.get("anti")),
+        "cross_unit_style_support": len(style_exemplars) >= 2,
+    }
+    filled = sum(bool(value) for value in slots.values())
+    readiness = "high" if all(slots.values()) else ("medium" if bool(selected) and filled >= 4 else "low")
+    warnings: List[str] = []
+    if micro_required and not rules.get("micro"):
+        warnings.append("当前是短对话，但没有命中对应微互动规则；不要用通用问候或客服句补齐")
+    if len(style_exemplars) < 2:
+        warnings.append("跨证据单元的声纹示例不足；召回置信度不能当作成品角色还原度")
+    if not rules.get("anti"):
+        warnings.append("没有命中反角色规则；发送前必须额外检查项目经理与客服骨架")
+    return {
+        "generation_readiness": readiness,
+        "retrieval_is_not_fidelity": True,
+        "micro_function": query.get("micro_function", ""),
+        "slots": slots,
+        "direct_match_card_ids": sorted(selected_ids),
+        "style_exemplars": style_exemplars,
+        "warnings": warnings,
+        "assembly_order": [
+            "从当前匹配卡提取角色面对触发时的即时反应",
+            "从微互动或声纹规则提取开场、断句、接话和收束方式",
+            "从角色核心或情绪关系规则确定立场与主动性",
+            "嵌入准确工作事实；不得套用通用助手的先做再做骨架",
+            "去掉名称和专有词后执行反角色检查",
+        ],
+    }
+
+
 def delivery_guidance(
     selected: Sequence[Match], rules: Dict[str, List[Dict[str, object]]], route: WorkRoute,
     risk: str, turns_since_presence: int, turns_since_initiative: int,
+    last_user_focus: str, open_thread: str, previous_shape: str,
 ) -> Dict[str, object]:
     high_risk = risk.lower() in HIGH_RISKS
     if high_risk:
@@ -449,11 +576,26 @@ def delivery_guidance(
         "work_initiative_condition": field_value(route.block, "主动表达条件"),
         "work_cooldown": field_value(route.block, "冷却与重复"),
         "no_fabrication": field_value(route.block, "禁止虚构"),
+        "conversation_continuity": {
+            "last_user_focus": last_user_focus,
+            "open_thread": open_thread,
+            "previous_shape": previous_shape,
+            "must_react_to_visible_focus": bool(last_user_focus),
+            "must_continue_open_thread": bool(open_thread),
+            "avoid_repeating_previous_shape": bool(previous_shape),
+            "question_is_optional": True,
+            "natural_stop_allowed": True,
+            "human_beat": "用一句有证据的即时反应、改口、立场或回访形成对话脉冲；不额外编造动作",
+        },
         "principles": [
-            "先给用户需要的内容，再在同一条消息中自然表现角色",
+            "召回置信度只说明卡片找得准，不说明最终回答已经像角色",
+            "回答必须组合即时反应、声纹结构、角色立场或关系模式及反角色检查，不能用一张卡给通用助手骨架背书",
+            "直接给用户需要的内容，并在同一条消息中自然表现角色",
             "画面只来自当前可见工作对象、已发生事件或原作证据，不虚构现实动作与感官",
             "一次最多一个临场动作或主动表达；连续几轮不要重复",
             "短应声、停顿词和语气词只能沿用角色证据，不能为了像人而堆叠",
+            "不要把每轮都收束成问题、下一步或行动号召；信息已足够时允许自然停住",
+            "连续几轮不得使用相同句数、相同开场和相同反应—解释—推进形状",
         ],
     }
 
@@ -489,12 +631,13 @@ def retrieval_diagnostics(
         "query_gaps": gaps,
         "evidence_gaps": evidence_gaps,
         "warning": "；".join(warnings),
+        "scope_note": "这些置信度只评价召回卡的相关性与证据完整度，不评价最终回答是否像角色",
     }
 
 
 def markdown_output(
     matches: Sequence[Match], card_count: int, rules: Dict[str, List[Dict[str, object]]],
-    retrieval: Dict[str, object], route: WorkRoute, delivery: Dict[str, object],
+    retrieval: Dict[str, object], route: WorkRoute, delivery: Dict[str, object], composition: Dict[str, object],
 ) -> str:
     lines = [
         f"<!-- selected={len(matches)} library_cards={card_count} confidence={retrieval['confidence']} -->",
@@ -502,10 +645,27 @@ def markdown_output(
         f"- 召回置信度：{retrieval['confidence']}",
         f"- 标签匹配置信度：{retrieval['match_confidence']}",
         f"- 证据完整度：{retrieval['evidence_confidence']}",
+        f"- 生成准备度：{composition['generation_readiness']}（与召回置信度分开）",
         f"- 临场表达：{delivery['presence_status']}；主动表达：{delivery['initiative_status']}",
     ]
+    continuity = delivery.get("conversation_continuity", {})
+    if continuity.get("last_user_focus"):
+        lines.append(f"- 本轮必须接住：{continuity['last_user_focus']}")
+    if continuity.get("open_thread"):
+        lines.append(f"- 本轮必须延续：{continuity['open_thread']}")
+    if continuity.get("previous_shape"):
+        lines.append(f"- 本轮避免重复形状：{continuity['previous_shape']}")
+    lines.append("- 允许自然收束：是；追问和下一步不是默认结尾")
+    slot_summary = "；".join(
+        f"{name}={'ready' if ready else 'missing'}"
+        for name, ready in composition.get("slots", {}).items()
+    )
+    if slot_summary:
+        lines.append(f"- 生成槽位：{slot_summary}")
     if retrieval["warning"]:
         lines.append(f"- 警告：{retrieval['warning']}")
+    for warning in composition.get("warnings", []):
+        lines.append(f"- 生成警告：{warning}")
     for item in matches:
         lines.extend(
             [
@@ -516,7 +676,21 @@ def markdown_output(
                 f"- 对白库文件：{item.card.source_file}", item.card.block,
             ]
         )
-    for label, key in (("角色核心规则", "core"), ("声纹规律", "voice"), ("情绪关系模式", "modes"), ("反角色规则", "anti")):
+    exemplars = composition.get("style_exemplars", [])
+    if exemplars:
+        lines.extend(["", "# 跨证据单元风格支持（不是当前场景召回）"])
+        for exemplar in exemplars:
+            lines.extend(
+                [
+                    "",
+                    f"## {exemplar['card_id']} | {exemplar.get('scene_id') or '未标场景'}",
+                    f"- 原文：{exemplar.get('original_text') or '无'}",
+                    f"- 即时反应观察：{exemplar.get('reaction') or '无'}",
+                    f"- 口语观察：{exemplar.get('oral_observation') or '无'}",
+                    f"- 节奏观察：{exemplar.get('rhythm_observation') or '无'}",
+                ]
+            )
+    for label, key in (("角色核心规则", "core"), ("声纹规律", "voice"), ("微互动规则", "micro"), ("情绪关系模式", "modes"), ("反角色规则", "anti")):
         if not rules[key]:
             continue
         lines.extend(["", f"# 命中的{label}"])
@@ -527,12 +701,14 @@ def markdown_output(
 
 def json_output(
     matches: Sequence[Match], card_count: int, rules: Dict[str, List[Dict[str, object]]],
-    retrieval: Dict[str, object], route: WorkRoute, delivery: Dict[str, object], query: Dict[str, str],
+    retrieval: Dict[str, object], route: WorkRoute, delivery: Dict[str, object],
+    composition: Dict[str, object], query: Dict[str, str],
 ) -> str:
     payload = {
         "library_cards": card_count,
         "work_route": {"scene_id": route.scene_id, "effective_query": query},
         "retrieval": retrieval,
+        "composition_guidance": composition,
         "delivery_guidance": delivery,
         "selected": [
             {
@@ -582,11 +758,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--risk", default="")
     parser.add_argument("--language", default="", help="输出语言；不用于过滤原语言语料")
     parser.add_argument("--source-language", default="", help="仅在需要时限制原文语言")
+    parser.add_argument(
+        "--micro-function", default="",
+        choices=("", "greeting", "acknowledgement", "gratitude", "apology", "surprise", "closing"),
+        help="问候、应答、感谢、道歉、惊讶或告别等短对话功能；任务对话留空",
+    )
     parser.add_argument("--limit", type=int, default=5, choices=range(1, 7), metavar="1..6")
     parser.add_argument("--exclude", action="append", default=[], help="排除编号，可重复或用逗号分隔")
     parser.add_argument("--allow-low-evidence", action="store_true", help="仅用于调试；允许返回低证据卡")
     parser.add_argument("--turns-since-presence", type=int, default=-1, help="距上次临场画面表达的轮数；未知为 -1")
     parser.add_argument("--turns-since-initiative", type=int, default=-1, help="距上次主动表达的轮数；未知为 -1")
+    parser.add_argument("--last-user-focus", default="", help="用户上一句话中本轮需要直接接住的具体词或短语")
+    parser.add_argument("--open-thread", default="", help="前文尚未收束、需要自然延续的话题；没有则留空")
+    parser.add_argument(
+        "--previous-shape", default="",
+        choices=("", "question", "directive", "reassurance", "summary", "celebration", "refusal", "explanation"),
+        help="上一条回复的主要形状，用于避免连续重复",
+    )
     parser.add_argument("--format", choices=("markdown", "json", "ids"), default="markdown")
     return parser
 
@@ -615,15 +803,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     selected = choose_matches(matches, min(args.limit, len(matches)), args.allow_low_evidence)
     rules = related_rules(root, selected, query)
     retrieval = retrieval_diagnostics(selected, matches, query)
+    composition = composition_guidance(cards, selected, rules, query)
     delivery = delivery_guidance(
-        selected, rules, route, args.risk, args.turns_since_presence, args.turns_since_initiative
+        selected, rules, route, args.risk, args.turns_since_presence, args.turns_since_initiative,
+        args.last_user_focus, args.open_thread, args.previous_shape,
     )
     if args.format == "json":
-        print(json_output(selected, len(cards), rules, retrieval, route, delivery, query), end="")
+        print(json_output(selected, len(cards), rules, retrieval, route, delivery, composition, query), end="")
     elif args.format == "ids":
         print("\n".join(item.card.card_id for item in selected))
     else:
-        print(markdown_output(selected, len(cards), rules, retrieval, route, delivery), end="")
+        print(markdown_output(selected, len(cards), rules, retrieval, route, delivery, composition), end="")
     return 0
 
 
