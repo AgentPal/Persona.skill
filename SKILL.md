@@ -39,6 +39,10 @@ else:
 
 进度消息不是交付，也不是暂停许可。若确有必要发送进度，发送后必须在同一轮继续调用下一项工具，不能等待用户说“继续”。`init` 成功只表示工作目录已建立：不要把目录链接、当前数量或“尚未生成/启用”单独回复给用户，必须立刻进入资料收集和填充。校验返回非零表示进入修复循环，不表示可以结束。处理时间较长、已经运行多次工具、当前只有部分资料、尚需继续搜索、上下文或令牌考虑，都不是硬阻塞。
 
+用户在创建任务未完成时询问“为什么还没完成”“现在到哪了”“有什么限制”“是否卡住”或质疑当前结果，只是插入的状态问题，不会取消、暂停或替换原创建任务。先用一小段回答用户最后一个问题，然后必须在同一轮立即继续调用工具；不得把解释原因当成新的终点。只有用户明确说“暂停”“取消”“停止创建”或改变目标，才解除持续执行锁。发生上下文压缩或新一轮继续时，先运行 `iteration-gate` 恢复当前阶段，不重新初始化、不重复询问名称。
+
+从初始化后开始执行确定性循环：每完成一批调研、卡片、规则修复或测试，就运行 `python scripts/persona_tool.py iteration-gate <角色目录> --activation-status pending`。读取 `LOOP_STAGE`、`ERROR_CODES` 和 `NEXT_ACTION`，立即执行下一动作；只要输出 `MUST_CONTINUE=true` 就禁止最终回复和等待用户。`RESEARCH` 返回资料与语境层，`REDISTILL` 重建规则证据链，`TEST` 实际运行并保存评测原始记录，`ENABLE` 完成启用。循环没有任意次数上限；同类错误重复时换来源、查询词、媒介、切分、蒸馏方式或测试输入，而不是停止。
+
 硬阻塞必须是用户才能解除的具体条件，例如：必须登录或取得付费资料权限、用户明确禁止扩大范围而现有资料无法完成、目标人物身份有歧义且不同选择会改变结果、目标路径无写入权限且没有安全替代位置。临时网络失败、单个站点不可用、某种媒介缺失、搜索结果不足或某项验证失败都不是硬阻塞；先换来源、语言、版本、检索方式或修复生成物。
 
 1. 识别目标人格类型：虚构角色、现实人物、原创人格或以参考特征形成的新原创人格。
@@ -152,11 +156,12 @@ else:
 
 ```text
 python scripts/persona_tool.py init --name "角色显示名" --slug role-slug --output <目标目录>
+python scripts/persona_tool.py iteration-gate <角色 Skill 目录> --activation-status pending
 python scripts/persona_tool.py validate <角色 Skill 目录> --level release
 python scripts/persona_tool.py completion-gate <角色 Skill 目录> --activation-status enabled
 ```
 
-`init` 拒绝覆盖已有目录并明确返回 `TERMINAL_ALLOWED=false`。`validate` 只做确定性静态检查；它不能替代真实场景测试、角色盲测或工作事实对照测试。`completion-gate` 会再次执行 release 校验，并同时检查创建任务是否已按要求启用；用户明确要求“只创建不启用”时才可传 `--activation-status not-requested`。门禁未输出 `TERMINAL_ALLOWED=true` 时禁止最终交付。
+`init` 拒绝覆盖已有目录并明确返回 `MUST_CONTINUE=true`。`iteration-gate` 是创建循环控制器：返回当前必须继续的阶段与下一动作，不替 Agent 执行调研或修复。`validate` 只做确定性静态检查；它不能替代真实场景测试、角色盲测或工作事实对照测试。`completion-gate` 会再次执行 release 校验，并同时检查创建任务是否已按要求启用；用户明确要求“只创建不启用”时才可传 `--activation-status not-requested`。门禁未输出 `TERMINAL_ALLOWED=true` 时禁止最终交付。
 
 生成的角色 Skill 使用自己的选择器按场景召回少量卡片：
 

@@ -239,6 +239,33 @@ def build_fixture(
             flags=re.MULTILINE | re.DOTALL,
         )
     write_text(cases_path, cases_text.rstrip() + "\n")
+    records_dir = target / "tests"
+    records_dir.mkdir(parents=True, exist_ok=True)
+
+    def items(count: int) -> str:
+        return "\n".join(f"ITEM-{index:02d}: pass | 可复核测试记录 {index}" for index in range(1, count + 1))
+
+    write_text(
+        records_dir / "blind-record-a",
+        "EVAL_RECORD_VERSION=1\nCASE_ID=CASE-18\nEVALUATOR_ID=隔离评测上下文 A\n"
+        "SAMPLE_COUNT=12\nPASS_COUNT=10\n" + items(12) + "\n",
+    )
+    write_text(
+        records_dir / "contrast-record-b",
+        "EVAL_RECORD_VERSION=1\nCASE_ID=CASE-19\nEVALUATOR_ID=独立评测 Agent B\n"
+        "SAMPLE_COUNT=10\nPASS_COUNT=8\n" + items(10) + "\n",
+    )
+    write_text(
+        records_dir / "evidence-map-record-c",
+        "EVAL_RECORD_VERSION=1\nCASE_ID=CASE-20\nEVALUATOR_ID=隔离证据审计上下文 C\n"
+        "TRACE_COUNT=6\nTRACE_PASS=6\nRETRIEVAL_PASS=5\nMAPPING_COUNT=12\nMAPPING_PASS=10\n"
+        + items(12) + "\n",
+    )
+    write_text(
+        records_dir / "batch-response-record-d",
+        "EVAL_RECORD_VERSION=1\nCASE_ID=CASE-23\nSAMPLE_COUNT=10\nCHECK_STATUS=pass\n"
+        + items(10) + "\n",
+    )
 
     cards = []
     index_rows = []
@@ -512,16 +539,18 @@ def build_fixture(
 """
         )
     research_profile = "稀缺" if research_status == "已穷尽" else ("丰富" if card_count >= 80 else "一般")
-    candidate_count = card_count + 12
+    pending_count = 2 if research_status == "已穷尽" else 0
+    candidate_count = card_count + pending_count + 10
     if research_status == "已穷尽":
         coverage = f"""## 调研覆盖记录
 
 - 调研状态：已穷尽
 - 资料丰度：{research_profile}
 - 资料丰度判定依据：扩大到多语言与多类来源后仍只有当前可核查资料
+- 资料丰度边界说明：已检查上一档目标所需的来源类型，但可核查原始表达不足
 - 候选表达数：{candidate_count}
 - 正式原文卡数：{card_count}
-- 待核验表达数：2
+- 待核验表达数：{pending_count}
 - 排除表达数：10
 - 排除原因摘要：重复定位、无原文或无法回查
 - 覆盖维度：身份、日常、失败、风险、关系、情绪与选择
@@ -537,12 +566,22 @@ def build_fixture(
 ### RESEARCH-01 | 初始范围
 
 - 查询词、站点、资料类型与语言：角色名、官方页、中文和日文
+- 本轮候选数：12
+- 本轮正式收录数：10
+- 本轮待核验数：1
+- 本轮排除数：1
+- 本轮新增率：4%
 - 新增来源与卡片：新增 12 张
 - 未覆盖指标：逐字原文卡和原作场景不足
 
 ### RESEARCH-02 | 扩大范围
 
 - 查询词、站点、资料类型与语言：别名、英文名、访谈、分集资料和对白
+- 本轮候选数：10
+- 本轮正式收录数：8
+- 本轮待核验数：1
+- 本轮排除数：1
+- 本轮新增率：0%
 - 新增来源与卡片：新增 8 张，此后无新增
 - 未覆盖指标：全网合理可访问资料仍不足
 """
@@ -551,6 +590,11 @@ def build_fixture(
 ### RESEARCH-03 | 低增量复查
 
 - 查询词、站点、资料类型与语言：遗漏别名、跨语言索引与长尾场景复查
+- 本轮候选数：3
+- 本轮正式收录数：2
+- 本轮待核验数：0
+- 本轮排除数：1
+- 本轮新增率：2%
 - 新增来源与卡片：新增 2% 的可核查卡片
 - 未覆盖指标：无
 """
@@ -559,9 +603,10 @@ def build_fixture(
 - 调研状态：达标
 - 资料丰度：{research_profile}
 - 资料丰度判定依据：存在多轮、跨场景、跨资料类型的可核查原始表达
+- 资料丰度边界说明：{'已按最高档丰富资料执行' if research_profile == '丰富' else '检查过更高档目标所需范围，但可核查原始表达规模未达到丰富档'}
 - 候选表达数：{candidate_count}
 - 正式原文卡数：{card_count}
-- 待核验表达数：2
+- 待核验表达数：{pending_count}
 - 排除表达数：10
 - 排除原因摘要：重复定位、无原文或无法回查
 - 覆盖维度：身份、日常、失败、风险、关系、情绪、选择、冲突、问候与告别
@@ -577,12 +622,22 @@ def build_fixture(
 ### RESEARCH-01 | 初始范围
 
 - 查询词、站点、资料类型与语言：角色名、官方页、剧情页、中文和日文
+- 本轮候选数：{card_count}
+- 本轮正式收录数：{max(card_count - 4, 0)}
+- 本轮待核验数：0
+- 本轮排除数：4
+- 本轮新增率：{'20%' if research_profile == '丰富' else '4%'}
 - 新增来源与卡片：建立首轮候选与正式卡
 - 未覆盖指标：仍需扩大场景与语言范围
 
 ### RESEARCH-02 | 扩大范围
 
 - 查询词、站点、资料类型与语言：别名、多语言索引、访谈、场景资料与可靠转写
+- 本轮候选数：6
+- 本轮正式收录数：4
+- 本轮待核验数：0
+- 本轮排除数：2
+- 本轮新增率：{'4%' if research_profile == '丰富' else '2%'}
 - 新增来源与卡片：补齐高识别表达和关系场景，新增率 4%
 - 未覆盖指标：无
 {extra_round}"""
@@ -684,6 +739,8 @@ class PersonaToolTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn("PERSONA_BUILD_STATE=INCOMPLETE", completed.stdout)
+            self.assertIn("MUST_CONTINUE=true", completed.stdout)
+            self.assertIn("LOOP_STAGE=RESEARCH", completed.stdout)
             self.assertIn("TERMINAL_ALLOWED=false", completed.stdout)
             self.assertIn("USER_REPORT_ALLOWED=false", completed.stdout)
             self.assertIn("NEXT_ACTION=立即继续调研", completed.stdout)
@@ -716,6 +773,20 @@ class PersonaToolTests(unittest.TestCase):
             self.assertIn("PERSONA_BUILD_STATE=INCOMPLETE", blocked.stdout)
             self.assertIn("TERMINAL_ALLOWED=false", blocked.stdout)
             self.assertIn("USER_REPORT_ALLOWED=false", blocked.stdout)
+            self.assertIn("MUST_CONTINUE=true", blocked.stdout)
+
+            iteration = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts" / "persona_tool.py"),
+                    "iteration-gate", str(partial), "--activation-status", "pending",
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertNotEqual(iteration.returncode, 0)
+            self.assertIn("MUST_CONTINUE=true", iteration.stdout)
+            self.assertIn("FINAL_REPORT_ALLOWED=false", iteration.stdout)
+            self.assertIn("LOOP_STAGE=", iteration.stdout)
+            self.assertIn("NEXT_ACTION=", iteration.stdout)
 
             complete = root / "complete-role"
             build_fixture(complete, "existing-character", 80, 40, 20)
@@ -729,6 +800,7 @@ class PersonaToolTests(unittest.TestCase):
             self.assertNotEqual(pending.returncode, 0)
             self.assertIn("PERSONA_BUILD_STATE=VALIDATED_NOT_ENABLED", pending.stdout)
             self.assertIn("TERMINAL_ALLOWED=false", pending.stdout)
+            self.assertIn("LOOP_STAGE=ENABLE", pending.stdout)
 
             allowed = subprocess.run(
                 [
@@ -741,6 +813,8 @@ class PersonaToolTests(unittest.TestCase):
             self.assertIn("PERSONA_BUILD_STATE=COMPLETE", allowed.stdout)
             self.assertIn("TERMINAL_ALLOWED=true", allowed.stdout)
             self.assertIn("USER_REPORT_ALLOWED=true", allowed.stdout)
+            self.assertIn("MUST_CONTINUE=false", allowed.stdout)
+            self.assertIn("LOOP_STAGE=COMPLETE", allowed.stdout)
 
     def test_existing_character_release_and_selector(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1117,6 +1191,34 @@ class PersonaToolTests(unittest.TestCase):
             self.assertIn("dialogue.context_locator_only", codes)
             self.assertIn("dialogue.complete_scene_context_missing", codes)
 
+    def test_generated_scene_placeholders_cannot_fake_grounded_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "templated-context"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            library = role / "references" / "06-对白库.md"
+            text = library.read_text(encoding="utf-8")
+            text = text.replace(
+                "- 前置原文：追问前一句测试原文 1",
+                "- 前置原文：第01话的SCENE-0001段落记录了与测试相关的片段。",
+                1,
+            )
+            text = text.replace(
+                "- 触发话语：追问触发话语 1",
+                "- 触发话语：SCENE-0001中出现当前变化后，角色以该卡所录短句回应。",
+                1,
+            )
+            text = text.replace(
+                "- 后续原文：追问后一句测试原文 1",
+                "- 后续原文：相邻转写条目继续记录同一事件的发展与其他人的反应。",
+                1,
+            )
+            write_text(library, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("dialogue.context_locator_only", codes)
+            self.assertIn("dialogue.complete_scene_context_missing", codes)
+
     def test_translated_or_unverified_text_cannot_count_as_original_language(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "translated-corpus"
@@ -1317,6 +1419,24 @@ class PersonaToolTests(unittest.TestCase):
             codes = {issue["code"] for issue in result["issues"]}
             self.assertIn("core_rule.evidence_mapping_observation_missing", codes)
 
+    def test_generic_evidence_mapping_observation_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "generic-map-observation"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            voice = role / "references" / "02-语言声纹.md"
+            text = voice.read_text(encoding="utf-8")
+            text = re.sub(
+                r"(TESTROLE-0001=>口语现象=)[^;；]+",
+                r"\1短促直接的说法",
+                text,
+                count=1,
+            )
+            write_text(voice, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("voice.evidence_mapping_observation_generic", codes)
+
     def test_selector_downgrades_high_tag_match_with_weak_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "weak-evidence"
@@ -1476,6 +1596,96 @@ class PersonaToolTests(unittest.TestCase):
             self.assertFalse(result["valid"])
             self.assertIn("tests.fidelity_not_passed", codes)
             self.assertIn("tests.blind_correct_low", codes)
+
+    def test_passed_fidelity_case_requires_structured_record_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "missing-eval-record"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            (role / "tests" / "blind-record-a").unlink()
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("tests.record_missing", codes)
+
+    def test_evaluation_record_counts_and_items_must_match_claims(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "fake-eval-record"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            record = role / "tests" / "contrast-record-b"
+            write_text(
+                record,
+                "EVAL_RECORD_VERSION=1\nCASE_ID=CASE-19\nEVALUATOR_ID=独立评测 Agent B\n"
+                "SAMPLE_COUNT=10\nPASS_COUNT=10\nITEM-01: pass | 只有一条\n",
+            )
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("tests.record_count_mismatch", codes)
+            self.assertIn("tests.record_items_low", codes)
+
+    def test_target_met_cannot_leave_pending_material(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "pending-material"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            sources = role / "references" / "08-来源索引.md"
+            text = sources.read_text(encoding="utf-8")
+            write_text(sources, text.replace("- 待核验表达数：0", "- 待核验表达数：2", 1))
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("research.pending_unresolved", codes)
+
+    def test_research_rounds_require_numeric_audit_and_matching_rates(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "weak-research-round"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            sources = role / "references" / "08-来源索引.md"
+            text = sources.read_text(encoding="utf-8")
+            text = text.replace("- 本轮候选数：80", "- 本轮候选数：很多", 1)
+            text = text.replace("- 本轮新增率：4%", "- 本轮新增率：3%", 1)
+            write_text(sources, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("research.round_audit_incomplete", codes)
+            self.assertIn("research.saturation_rate_mismatch", codes)
+
+    def test_iteration_gate_routes_rule_and_test_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            redistill = root / "redistill-role"
+            build_fixture(redistill, "existing-character", 80, 40, 20)
+            voice = redistill / "references" / "02-语言声纹.md"
+            text = voice.read_text(encoding="utf-8")
+            text = re.sub(
+                r"(TESTROLE-0001=>口语现象=)[^;；]+",
+                r"\1短促直接的说法",
+                text,
+                count=1,
+            )
+            write_text(voice, text)
+            redistill_gate = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts" / "persona_tool.py"),
+                    "iteration-gate", str(redistill), "--activation-status", "pending",
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertIn("LOOP_STAGE=REDISTILL", redistill_gate.stdout)
+            self.assertIn("MUST_CONTINUE=true", redistill_gate.stdout)
+
+            retest = root / "retest-role"
+            build_fixture(retest, "existing-character", 80, 40, 20)
+            (retest / "tests" / "blind-record-a").unlink()
+            test_gate = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts" / "persona_tool.py"),
+                    "iteration-gate", str(retest), "--activation-status", "pending",
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertIn("LOOP_STAGE=TEST", test_gate.stdout)
+            self.assertIn("MUST_CONTINUE=true", test_gate.stdout)
 
     def test_batch_fidelity_rejects_uniform_shape_and_question_closure(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1657,11 +1867,17 @@ class PersonaToolTests(unittest.TestCase):
         self.assertIn("进度消息不是交付，也不是暂停许可", creator)
         self.assertIn("不得把脚手架初始化", creator)
         self.assertIn("不能等待用户说“继续”", creator)
+        self.assertIn("只是插入的状态问题，不会取消、暂停或替换原创建任务", creator)
+        self.assertIn("只要输出 `MUST_CONTINUE=true` 就禁止最终回复和等待用户", creator)
+        self.assertIn("发生上下文压缩或新一轮继续时，先运行 `iteration-gate`", creator)
         self.assertIn("completion-gate", creator)
+        self.assertIn("iteration-gate", creator)
         self.assertIn("只有它输出 `TERMINAL_ALLOWED=true`", creator)
         workflow = (ROOT / "references" / "05-生成与验证规范.md").read_text(encoding="utf-8")
         self.assertIn("RESEARCH -> GENERATE -> VALIDATE -> FIX -> TEST -> ENABLE -> COMPLETE", workflow)
         self.assertIn("不得要求用户再次发送“继续”", workflow)
+        self.assertIn("用户在未完成期间询问状态、原因、限制或是否卡住时", workflow)
+        self.assertIn("禁止生成脚本预填“通过”", workflow)
         openai_yaml = (ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
         self.assertIn("不要停在初始化或进度汇报", openai_yaml)
         self.assertIn("不按版权类别、文本长度或资料完整度限制收集", creator)

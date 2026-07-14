@@ -198,13 +198,27 @@ RESEARCH_PROFILES = {
     },
 }
 REQUIRED_RESEARCH_AUDIT_FIELDS = (
-    "资料丰度判定依据", "候选表达数", "正式原文卡数", "待核验表达数", "排除表达数",
+    "资料丰度判定依据", "资料丰度边界说明", "候选表达数", "正式原文卡数", "待核验表达数", "排除表达数",
     "排除原因摘要", "覆盖维度", "最近两轮新增率", "饱和结论",
+)
+REQUIRED_RESEARCH_ROUND_FIELDS = (
+    "查询词、站点、资料类型与语言", "本轮候选数", "本轮正式收录数", "本轮待核验数",
+    "本轮排除数", "本轮新增率", "新增来源与卡片", "未覆盖指标",
 )
 LOCATOR_ONLY_CONTEXT_MARKERS = (
     "以话数与场景标题定位", "资料说明可定位", "由同一官方场景条目定位",
     "见来源页", "见来源索引", "官方场景页以", "定位（", "定位(",
 )
+TEMPLATED_CONTEXT_MARKERS = (
+    "段落记录了与", "中出现当前变化后", "以该卡所录短句回应",
+    "相邻转写条目继续记录", "同一事件的发展与其他人的反应",
+    "听见当前变化后表态", "当前变化使", "继续行动或给出回应",
+)
+GENERIC_MAPPING_OBSERVATIONS = {
+    "短促直接的说法", "先接住对象再推进", "可见的情绪词", "在事件中采取对应立场",
+    "自然的短句反应", "把判断交回具体关系", "短句中的立场表达", "在对话中落实判断",
+    "当前字段支持该结论", "该卡支持此规律", "与结论一致", "符合角色风格",
+}
 
 REQUIRED_SCENES = {
     "start",
@@ -310,8 +324,12 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     print(f"PERSONA_WORKDIR={target}")
     print("PERSONA_BUILD_STATE=INCOMPLETE")
+    print("MUST_CONTINUE=true")
     print("TERMINAL_ALLOWED=false")
     print("USER_REPORT_ALLOWED=false")
+    print("FINAL_REPORT_ALLOWED=false")
+    print("STATUS_REPLY_ALLOWED=true")
+    print("LOOP_STAGE=RESEARCH")
     print("NEXT_ACTION=立即继续调研并填写全部占位内容；随后反复修复 release 校验，启用后运行 completion-gate。")
     print("禁止在初始化后结束当前任务、等待用户说继续，或把此目录当作已创建的人格 Skill 交付。")
     return 0
@@ -508,6 +526,16 @@ def validate_rule_evidence_mapping(
                 f"{rule_id} 对 {card_id} 只写了字段名，没有记录该字段中支持结论的具体观察；使用“字段=观察”格式",
                 path, root,
             )
+        normalized_observation = normalize_template_text(observation)
+        if observation.strip() in GENERIC_MAPPING_OBSERVATIONS or normalized_observation in {
+            normalize_template_text(item) for item in GENERIC_MAPPING_OBSERVATIONS
+        }:
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                f"{code_prefix}.evidence_mapping_observation_generic",
+                f"{rule_id} 对 {card_id} 的观察“{observation}”是可批量套用的空泛标签；必须写出该卡字段里实际出现的词、句法、互动或情绪证据",
+                path, root,
+            )
         card_block = card_blocks.get(card_id)
         if card_block is not None and not has_substantive_value(field_value(card_block, source_field), allow_none=True):
             add_issue(
@@ -576,7 +604,35 @@ def context_is_grounded(value: str | None) -> bool:
     if context_is_missing(value):
         return False
     normalized = (value or "").strip().lower()
-    return not any(marker in normalized for marker in LOCATOR_ONLY_CONTEXT_MARKERS)
+    return not any(
+        marker in normalized
+        for marker in LOCATOR_ONLY_CONTEXT_MARKERS + TEMPLATED_CONTEXT_MARKERS
+    )
+
+
+def structured_record_value(text: str, key: str) -> str | None:
+    match = re.search(rf"^\s*{re.escape(key)}\s*=\s*(.+?)\s*$", text, re.MULTILINE)
+    return match.group(1).strip() if match else None
+
+
+def structured_record_int(text: str, key: str) -> int | None:
+    value = structured_record_value(text, key)
+    return int(value) if value and value.isdigit() else None
+
+
+def resolve_record_path(root: Path, value: str | None) -> Path | None:
+    if not has_substantive_value(value):
+        return None
+    candidate = Path(value or "")
+    if candidate.is_absolute():
+        return None
+    resolved_root = root.resolve()
+    resolved = (resolved_root / candidate).resolve()
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError:
+        return None
+    return resolved
 
 
 def extract_claimed_card_ids(value: str | None) -> set[str]:
@@ -817,8 +873,13 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     research_rounds_complete = all(
         all(
             has_substantive_value(field_value(block, field), allow_none=True)
-            for field in ("查询词、站点、资料类型与语言", "新增来源与卡片", "未覆盖指标")
+            for field in REQUIRED_RESEARCH_ROUND_FIELDS
         )
+        and all(
+            integer_field(block, field) is not None
+            for field in ("本轮候选数", "本轮正式收录数", "本轮待核验数", "本轮排除数")
+        )
+        and len(percentage_values(block, "本轮新增率")) == 1
         for _, block in research_blocks
     )
     expansion_record = field_value(sources_text, "扩大范围记录")
@@ -909,6 +970,29 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             add_issue(
                 issues, "error", "research.not_saturated",
                 "达标前必须记录最近两轮新增率且均不高于 5%，并明确写出“已饱和”；不能因达到最低数量立即停止",
+                sources_path, root,
+            )
+        if research_status == "达标" and pending_material_count not in {None, 0}:
+            add_issue(
+                issues, "error", "research.pending_unresolved",
+                f"达标时仍有 {pending_material_count} 条待核验表达；必须继续核验、明确排除，或在确实穷尽后改走“已穷尽”路径",
+                sources_path, root,
+            )
+        if research_blocks and not research_rounds_complete:
+            add_issue(
+                issues, "error", "research.round_audit_incomplete",
+                "每个 RESEARCH 轮次都必须记录查询范围、本轮候选/正式/待核验/排除数量、本轮新增率、新增内容和未覆盖指标",
+                sources_path, root,
+            )
+        round_rates = [
+            percentage_values(block, "本轮新增率")[0]
+            for _, block in research_blocks
+            if len(percentage_values(block, "本轮新增率")) == 1
+        ]
+        if len(round_rates) >= 2 and len(saturation_rates) >= 2 and round_rates[-2:] != saturation_rates[-2:]:
+            add_issue(
+                issues, "error", "research.saturation_rate_mismatch",
+                "调研覆盖记录中的最近两轮新增率必须与最后两个 RESEARCH 轮次的本轮新增率一致",
                 sources_path, root,
             )
         if None in {candidate_material_count, declared_formal_cards, pending_material_count, rejected_material_count}:
@@ -1537,6 +1621,15 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 cases_path,
                 root,
             )
+        if evaluator_id.startswith(("待", "尚未", "未")) or "完成后" in evaluator_id:
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "tests.evaluator_pending",
+                f"{case_id} 的评估者仍是待办描述，不是实际评估者：{evaluator_id}",
+                cases_path,
+                root,
+            )
     blind_samples = integer_field(case_blocks.get("CASE-18", ""), "样本数")
     blind_correct = integer_field(case_blocks.get("CASE-18", ""), "正确识别数")
     contrast_samples = integer_field(case_blocks.get("CASE-19", ""), "样本数")
@@ -1554,6 +1647,104 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     uniform_structure = (field_value(case_blocks.get("CASE-23", ""), "长度与句数异常集中") or "").strip()
     low_readiness = integer_field(case_blocks.get("CASE-23", ""), "低生成准备度样本数")
     batch_checker_status = (field_value(case_blocks.get("CASE-23", ""), "检查结果") or "").strip().lower()
+
+    record_expectations = {
+        "CASE-18": {
+            "counts": {"SAMPLE_COUNT": blind_samples, "PASS_COUNT": blind_correct},
+            "minimum_items": blind_samples,
+            "evaluator": field_value(case_blocks.get("CASE-18", ""), "评估者标识"),
+        },
+        "CASE-19": {
+            "counts": {"SAMPLE_COUNT": contrast_samples, "PASS_COUNT": contrast_correct},
+            "minimum_items": contrast_samples,
+            "evaluator": field_value(case_blocks.get("CASE-19", ""), "评估者标识"),
+        },
+        "CASE-20": {
+            "counts": {
+                "TRACE_COUNT": trace_samples,
+                "TRACE_PASS": trace_correct,
+                "RETRIEVAL_PASS": retrieval_correct,
+                "MAPPING_COUNT": mapping_samples,
+                "MAPPING_PASS": mapping_correct,
+            },
+            "minimum_items": mapping_samples,
+            "evaluator": field_value(case_blocks.get("CASE-20", ""), "评估者标识"),
+        },
+        "CASE-23": {
+            "counts": {"SAMPLE_COUNT": batch_samples},
+            "minimum_items": batch_samples,
+            "evaluator": None,
+        },
+    }
+    for case_id, expectation in record_expectations.items():
+        block = case_blocks.get(case_id, "")
+        if field_value(block, "验证状态") != "通过":
+            continue
+        raw_record_path = field_value(block, "原始记录位置")
+        record_path = resolve_record_path(root, raw_record_path)
+        if record_path is None:
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "tests.record_path_invalid",
+                f"{case_id} 的原始记录必须是角色 Skill 目录内的相对路径",
+                cases_path, root,
+            )
+            continue
+        if not record_path.is_file():
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "tests.record_missing",
+                f"{case_id} 标为通过，但原始记录文件不存在：{raw_record_path}",
+                cases_path, root,
+            )
+            continue
+        record_text = read_text(record_path)
+        if PLACEHOLDER_RE.search(record_text) or structured_record_value(record_text, "EVAL_RECORD_VERSION") != "1":
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "tests.record_unstructured",
+                f"{case_id} 的原始记录缺少 EVAL_RECORD_VERSION=1 或仍含占位符",
+                record_path, root,
+            )
+        if structured_record_value(record_text, "CASE_ID") != case_id:
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "tests.record_case_mismatch",
+                f"{case_id} 的原始记录 CASE_ID 不匹配",
+                record_path, root,
+            )
+        evaluator = expectation["evaluator"]
+        if evaluator and structured_record_value(record_text, "EVALUATOR_ID") != evaluator:
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "tests.record_evaluator_mismatch",
+                f"{case_id} 的原始记录没有写入与验证用例一致的 EVALUATOR_ID",
+                record_path, root,
+            )
+        for key, expected in expectation["counts"].items():
+            if expected is not None and structured_record_int(record_text, key) != expected:
+                add_issue(
+                    issues, "error" if level == "release" else "warning",
+                    "tests.record_count_mismatch",
+                    f"{case_id} 的原始记录 {key} 与验证用例不一致",
+                    record_path, root,
+                )
+        minimum_items = expectation["minimum_items"]
+        item_count = len(re.findall(r"^ITEM-\d+[：:]", record_text, re.MULTILINE))
+        if minimum_items is not None and item_count < minimum_items:
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "tests.record_items_low",
+                f"{case_id} 声明 {minimum_items} 个样本或映射，但原始记录只有 {item_count} 条 ITEM 记录",
+                record_path, root,
+            )
+        if case_id == "CASE-23" and structured_record_value(record_text, "CHECK_STATUS") != batch_checker_status:
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "tests.record_checker_mismatch",
+                "CASE-23 的原始记录 CHECK_STATUS 与验证用例不一致",
+                record_path, root,
+            )
     fidelity_thresholds = (
         (blind_samples is not None and blind_samples >= 12, "tests.blind_samples_low", "CASE-18 去名盲测至少需要 12 个样本"),
         (blind_correct is not None and blind_correct >= 10 and blind_samples is not None and blind_correct <= blind_samples, "tests.blind_correct_low", "CASE-18 至少需要正确识别 10 个样本，且不能超过样本数"),
@@ -2691,35 +2882,88 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 0 if result["valid"] else 1
 
 
-def cmd_completion_gate(args: argparse.Namespace) -> int:
-    """Provide a deterministic final-answer gate for persona creation tasks."""
-    root = Path(args.path).expanduser().resolve()
+def classify_loop_stage(error_codes: list[str]) -> tuple[str, str]:
+    priorities = (
+        (
+            "RESEARCH",
+            ("research.", "sources.", "dialogue."),
+            "继续扩大或核验来源，修正原文卡、真实语境与调研轮次记录；完成后重新运行 iteration-gate。",
+        ),
+        (
+            "REDISTILL",
+            ("core_rule.", "voice.", "micro.", "mode.", "anti.", "scene."),
+            "从可计数证据卡重新蒸馏规则，逐条修复证据映射和检索条件；禁止批量套话，完成后重新运行 iteration-gate。",
+        ),
+        (
+            "TEST",
+            ("tests.",),
+            "实际运行失败或缺失的测试，保存结构化原始记录；失败则回到对应资料或规则阶段修复，再重新运行 iteration-gate。",
+        ),
+        (
+            "GENERATE",
+            ("persona.", "content.", "biography.", "openai.", "skill."),
+            "修复人格结构、人物背景、占位内容或 Skill 元数据，然后重新运行 iteration-gate。",
+        ),
+    )
+    for stage, prefixes, action in priorities:
+        if any(code.startswith(prefixes) for code in error_codes):
+            return stage, action
+    return "FIX", "按错误代码修复当前生成物，然后重新运行 iteration-gate。"
+
+
+def emit_gate(root: Path, activation_status: str, command_name: str) -> int:
     result = validate_skill(root, "release")
     if not result["valid"]:
         error_codes = []
         for issue in result["issues"]:
             if issue["severity"] == "error" and issue["code"] not in error_codes:
                 error_codes.append(issue["code"])
+        stage, action = classify_loop_stage(error_codes)
         print("PERSONA_BUILD_STATE=INCOMPLETE")
+        print("MUST_CONTINUE=true")
         print("TERMINAL_ALLOWED=false")
         print("USER_REPORT_ALLOWED=false")
+        print("FINAL_REPORT_ALLOWED=false")
+        print("STATUS_REPLY_ALLOWED=true")
+        print(f"LOOP_STAGE={stage}")
         print(f"RELEASE_ERROR_COUNT={result['error_count']}")
         print("ERROR_CODES=" + ",".join(error_codes[:20]))
-        print("NEXT_ACTION=按错误代码继续修复；数量或来源不足则扩大调研，然后重新运行 completion-gate。")
+        print(f"NEXT_ACTION={action}")
+        print(f"RETRY_COMMAND=python scripts/persona_tool.py {command_name} \"{root}\" --activation-status {activation_status}")
         return 1
-    if args.activation_status == "pending":
+    if activation_status == "pending":
         print("PERSONA_BUILD_STATE=VALIDATED_NOT_ENABLED")
+        print("MUST_CONTINUE=true")
         print("TERMINAL_ALLOWED=false")
         print("USER_REPORT_ALLOWED=false")
+        print("FINAL_REPORT_ALLOWED=false")
+        print("STATUS_REPLY_ALLOWED=true")
+        print("LOOP_STAGE=ENABLE")
         print("NEXT_ACTION=按用户要求启用当前会话或持久作用域；完成后以 enabled 重新运行 completion-gate。")
         return 1
 
     print("PERSONA_BUILD_STATE=COMPLETE")
+    print("MUST_CONTINUE=false")
     print("TERMINAL_ALLOWED=true")
     print("USER_REPORT_ALLOWED=true")
-    print(f"ACTIVATION_STATUS={args.activation_status}")
+    print("FINAL_REPORT_ALLOWED=true")
+    print("STATUS_REPLY_ALLOWED=true")
+    print("LOOP_STAGE=COMPLETE")
+    print(f"ACTIVATION_STATUS={activation_status}")
     print(f"PERSONA_PATH={root}")
     return 0
+
+
+def cmd_iteration_gate(args: argparse.Namespace) -> int:
+    """Return the next mandatory stage for an active persona build."""
+    root = Path(args.path).expanduser().resolve()
+    return emit_gate(root, args.activation_status, "iteration-gate")
+
+
+def cmd_completion_gate(args: argparse.Namespace) -> int:
+    """Provide a deterministic final-answer gate for persona creation tasks."""
+    root = Path(args.path).expanduser().resolve()
+    return emit_gate(root, args.activation_status, "completion-gate")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2741,6 +2985,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     validate_parser.add_argument("--json", action="store_true", help="输出 JSON 结果")
     validate_parser.set_defaults(func=cmd_validate)
+
+    iteration_parser = subparsers.add_parser(
+        "iteration-gate", help="返回当前创建循环必须继续执行的阶段和下一动作"
+    )
+    iteration_parser.add_argument("path", help="角色人格 Skill 目录")
+    iteration_parser.add_argument(
+        "--activation-status",
+        choices=("pending", "enabled", "not-requested"),
+        default="pending",
+        help="当前启用状态；创建循环通常保持 pending，完成启用后改为 enabled",
+    )
+    iteration_parser.set_defaults(func=cmd_iteration_gate)
 
     gate_parser = subparsers.add_parser(
         "completion-gate", help="创建任务最终回复前的确定性完成门禁"
