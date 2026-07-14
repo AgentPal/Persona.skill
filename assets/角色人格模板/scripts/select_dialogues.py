@@ -35,13 +35,17 @@ WEIGHTS = {
 STRONG_KEYS = {"speech_act", "trigger", "interaction"}
 SIGNATURE_LEVELS = {"核心", "常用"}
 VERIFIED_LABEL_EVIDENCE = {"原文可见", "上下文可见", "来源明确", "用户确认"}
-VERIFIED_ORIGINAL_QUALITIES = {"原声核验", "原语言文本核验", "原始版式核验", "原创确认"}
+VERIFIED_ORIGINAL_QUALITIES = {"原声核验", "原语言文本核验", "可靠转写核验", "原始版式核验", "原创确认"}
 COMPLETE_SCENES = {"完整", "语境充分", "原创设定"}
 CONVERSATIONAL_CONTEXTS = {"对话场景", "访谈回答"}
 NARRATIVE_CONTEXTS = {"叙事场景", "内心独白"}
 SELF_CONTAINED_CONTEXTS = {"演讲发言", "博客文章", "社交媒体", "书信"}
 CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
 HIGH_RISKS = {"high", "critical", "danger", "severe"}
+LOCATOR_ONLY_CONTEXT_MARKERS = (
+    "以话数与场景标题定位", "资料说明可定位", "由同一官方场景条目定位",
+    "见来源页", "见来源索引", "官方场景页以", "定位（", "定位(",
+)
 
 
 @dataclass(frozen=True)
@@ -69,6 +73,7 @@ class Card:
     trigger_text: str
     next_text: str
     dialogue_target: str
+    direct_use: str
 
 
 @dataclass(frozen=True)
@@ -141,6 +146,13 @@ def context_is_missing(value: str) -> bool:
     )
 
 
+def context_is_grounded(value: str) -> bool:
+    normalized = value.strip().lower()
+    return not context_is_missing(value) and not any(
+        marker in normalized for marker in LOCATOR_ONLY_CONTEXT_MARKERS
+    )
+
+
 def iter_card_blocks(text: str) -> Iterable[Tuple[str, str]]:
     matches = list(CARD_HEADING_RE.finditer(text))
     for index, match in enumerate(matches):
@@ -201,6 +213,7 @@ def load_cards(root: Path) -> List[Card]:
                     trigger_text=field_value(block, "触发话语"),
                     next_text=field_value(block, "后续原文"),
                     dialogue_target=field_value(block, "对话对象"),
+                    direct_use=field_value(block, "可直接使用"),
                 )
             )
     return cards
@@ -252,26 +265,37 @@ def language_matches(query: str, value: str) -> bool:
 
 def evidence_for_match(card: Card, matched: Set[str]) -> Tuple[str, Tuple[str, ...]]:
     gaps: List[str] = []
+    direct_only = (
+        card.scene_completeness not in COMPLETE_SCENES
+        and card.direct_use in {"是", "仅短句"}
+        and "speech_act" in matched
+        and matched <= {"speech_act", "interaction", "position"}
+    )
     for key in sorted(matched):
         evidence = card.label_evidence.get(key, "")
         if not evidence:
             gaps.append(f"{key}:missing-evidence")
         elif evidence not in VERIFIED_LABEL_EVIDENCE:
             gaps.append(f"{key}:{evidence}")
-    if "trigger" in matched and context_is_missing(card.trigger_text):
+    if "trigger" in matched and not context_is_grounded(card.trigger_text):
         gaps.append("trigger:missing-context")
-    if "relation" in matched and context_is_missing(card.dialogue_target):
+    if "relation" in matched and not context_is_grounded(card.dialogue_target):
         gaps.append("relation:missing-target")
     if card.original_quality not in VERIFIED_ORIGINAL_QUALITIES:
         gaps.append("original:unverified")
-    if card.scene_completeness not in COMPLETE_SCENES:
+    if card.scene_completeness not in COMPLETE_SCENES and not direct_only:
         gaps.append("scene:incomplete")
 
     if gaps:
         return "low", tuple(sorted(set(gaps)))
+    if direct_only:
+        # A verified, self-contained catchphrase may answer an exact surface
+        # act.  It remains medium and cannot support generalized rules because
+        # release validation requires complete context for those rules.
+        return "medium", ("scope:direct-only",)
     verified_count = sum(card.label_evidence.get(key) in VERIFIED_LABEL_EVIDENCE for key in matched)
     context_count = sum(
-        not context_is_missing(value)
+        context_is_grounded(value)
         for value in (card.previous_text, card.trigger_text, card.next_text, card.dialogue_target)
     )
     if card.context_type in CONVERSATIONAL_CONTEXTS:
@@ -304,7 +328,7 @@ def score_card(card: Card, query: Dict[str, str]) -> Optional[Match]:
             score += weight
             matched.append(key)
 
-    if card.source_type in {"原作明确", "本人公开表达"}:
+    if card.source_type in {"原作明确", "可靠转写", "本人公开表达"}:
         score += 2
     if card.original_quality == "原声核验":
         score += 3

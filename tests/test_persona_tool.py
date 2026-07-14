@@ -511,10 +511,22 @@ def build_fixture(
 - 支持的结论或卡片：{support_value}
 """
         )
+    research_profile = "稀缺" if research_status == "已穷尽" else ("丰富" if card_count >= 80 else "一般")
+    candidate_count = card_count + 12
     if research_status == "已穷尽":
-        coverage = """## 调研覆盖记录
+        coverage = f"""## 调研覆盖记录
 
 - 调研状态：已穷尽
+- 资料丰度：{research_profile}
+- 资料丰度判定依据：扩大到多语言与多类来源后仍只有当前可核查资料
+- 候选表达数：{candidate_count}
+- 正式原文卡数：{card_count}
+- 待核验表达数：2
+- 排除表达数：10
+- 排除原因摘要：重复定位、无原文或无法回查
+- 覆盖维度：身份、日常、失败、风险、关系、情绪与选择
+- 最近两轮新增率：4%, 0%
+- 饱和结论：合理可访问范围已穷尽
 - 初始检索范围：官方角色页与作品页
 - 扩大范围记录：继续检查分集资料、访谈、别名和多语言页面
 - 检查的站点与资料类型：官方页、剧情页、访谈、对白资料
@@ -535,22 +547,45 @@ def build_fixture(
 - 未覆盖指标：全网合理可访问资料仍不足
 """
     else:
-        coverage = """## 调研覆盖记录
+        extra_round = "" if research_profile == "一般" else """
+### RESEARCH-03 | 低增量复查
+
+- 查询词、站点、资料类型与语言：遗漏别名、跨语言索引与长尾场景复查
+- 新增来源与卡片：新增 2% 的可核查卡片
+- 未覆盖指标：无
+"""
+        coverage = f"""## 调研覆盖记录
 
 - 调研状态：达标
+- 资料丰度：{research_profile}
+- 资料丰度判定依据：存在多轮、跨场景、跨资料类型的可核查原始表达
+- 候选表达数：{candidate_count}
+- 正式原文卡数：{card_count}
+- 待核验表达数：2
+- 排除表达数：10
+- 排除原因摘要：重复定位、无原文或无法回查
+- 覆盖维度：身份、日常、失败、风险、关系、情绪、选择、冲突、问候与告别
+- 最近两轮新增率：4%, 2%
+- 饱和结论：已饱和
 - 初始检索范围：官方资料与可核查场景
-- 扩大范围记录：无（初始范围已达标）
+- 扩大范围记录：继续扩大到别名、多语言索引与不同资料类型，直到连续两轮低增量
 - 检查的站点与资料类型：官方页、剧情页、对白资料
 - 检查的版本、别名与语言：主要版本与中日文名称
-- 各轮新增结果：首轮达到全部资料目标
+- 各轮新增结果：首轮建立基线，第二轮补齐缺口，最后两轮新增率降至 4% 与 2%
 - 未达到目标的指标与原因：无
 
 ### RESEARCH-01 | 初始范围
 
 - 查询词、站点、资料类型与语言：角色名、官方页、剧情页、中文和日文
-- 新增来源与卡片：达到全部资料目标
+- 新增来源与卡片：建立首轮候选与正式卡
+- 未覆盖指标：仍需扩大场景与语言范围
+
+### RESEARCH-02 | 扩大范围
+
+- 查询词、站点、资料类型与语言：别名、多语言索引、访谈、场景资料与可靠转写
+- 新增来源与卡片：补齐高识别表达和关系场景，新增率 4%
 - 未覆盖指标：无
-"""
+{extra_round}"""
     write_text(
         target / "references" / "08-来源索引.md",
         "# 测试角色来源索引\n\n" + coverage + "\n" + "\n".join(source_entries),
@@ -813,24 +848,24 @@ class PersonaToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "novel-role"
             build_fixture(
-                role, "existing-character", 24, 8, 8,
+                role, "existing-character", 40, 15, 10,
                 medium="文字", context_type="内心独白",
             )
             result = persona_tool.validate_skill(role, "release")
             self.assertTrue(result["valid"], result["issues"])
-            self.assertEqual(result["metrics"]["distinct_evidence_units"], 8)
-            self.assertEqual(result["metrics"]["performance_verified_cards"], 24)
+            self.assertEqual(result["metrics"]["distinct_evidence_units"], 15)
+            self.assertEqual(result["metrics"]["performance_verified_cards"], 40)
 
     def test_real_person_releases_from_public_posts_without_dialogue_turns(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "public-person-role"
             build_fixture(
-                role, "real-person-simulation", 24, 8, 8,
+                role, "real-person-simulation", 40, 15, 10,
                 medium="公开表达", context_type="社交媒体",
             )
             result = persona_tool.validate_skill(role, "release")
             self.assertTrue(result["valid"], result["issues"])
-            self.assertEqual(result["metrics"]["distinct_evidence_units"], 8)
+            self.assertEqual(result["metrics"]["distinct_evidence_units"], 15)
             self.assertEqual(result["metrics"]["original_sources"], 3)
 
     def test_self_contained_expression_still_requires_publication_context(self) -> None:
@@ -861,6 +896,33 @@ class PersonaToolTests(unittest.TestCase):
             self.assertIn("dialogue.exact_original_cards_low", codes)
             self.assertIn("dialogue.source_scenes_low", codes)
             self.assertIn("dialogue.signature_cards_low", codes)
+            self.assertEqual(result["metrics"]["research_profile"], "一般")
+
+    def test_sparse_profile_cannot_be_marked_as_target_met(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "false-sparse-pass"
+            build_fixture(role, "existing-character", 24, 8, 8)
+            source_path = role / "references" / "08-来源索引.md"
+            text = source_path.read_text(encoding="utf-8").replace("- 资料丰度：一般", "- 资料丰度：稀缺", 1)
+            write_text(source_path, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("research.sparse_cannot_pass", codes)
+
+    def test_target_met_requires_low_increment_saturation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "unsaturated-role"
+            build_fixture(role, "existing-character", 40, 15, 10)
+            source_path = role / "references" / "08-来源索引.md"
+            text = source_path.read_text(encoding="utf-8").replace(
+                "- 最近两轮新增率：4%, 2%", "- 最近两轮新增率：18%, 9%", 1
+            )
+            write_text(source_path, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("research.not_saturated", codes)
 
     def test_exhausted_research_releases_all_available_material(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -934,12 +996,72 @@ class PersonaToolTests(unittest.TestCase):
             text = library.read_text(encoding="utf-8")
             text = text.replace("- 卡片类型：原文对白", "- 卡片类型：原创规范对白", 1)
             text = text.replace("- 原文：原作逐字原句 3", "- 原文：原作逐字原句 2", 1)
+            text = text.replace("- 来源位置：SRC-0003，测试定位 3", "- 来源位置：SRC-0002，测试定位 2", 1)
+            text = text.replace("- 场景编号：SCENE-0003", "- 场景编号：SCENE-0002", 1)
             write_text(library, text)
             result = persona_tool.validate_skill(role, "release")
             codes = {issue["code"] for issue in result["issues"]}
             self.assertFalse(result["valid"])
             self.assertIn("dialogue.non_original_card", codes)
             self.assertIn("dialogue.duplicate_original_text", codes)
+
+    def test_repeated_original_in_distinct_scenes_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "repeated-catchphrase"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            library = role / "references" / "06-对白库.md"
+            text = library.read_text(encoding="utf-8")
+            write_text(library, text.replace("- 原文：原作逐字原句 3", "- 原文：原作逐字原句 2", 1))
+            result = persona_tool.validate_skill(role, "release")
+            self.assertTrue(result["valid"], result["issues"])
+            self.assertEqual(result["metrics"]["exact_original_cards"], 80)
+            self.assertEqual(result["metrics"]["unique_original_expressions"], 79)
+
+    def test_reliable_transcript_is_valid_original_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "transcript-role"
+            build_fixture(role, "existing-character", 40, 15, 10)
+            library = role / "references" / "06-对白库.md"
+            text = library.read_text(encoding="utf-8")
+            text = text.replace("- 来源类型：原作明确", "- 来源类型：可靠转写")
+            text = text.replace("- 原文质量：原声核验", "- 原文质量：可靠转写核验")
+            write_text(library, text)
+            source_path = role / "references" / "08-来源索引.md"
+            source_text = source_path.read_text(encoding="utf-8").replace(
+                "- 来源类型：原作明确", "- 来源类型：可靠转写"
+            )
+            write_text(source_path, source_text)
+            result = persona_tool.validate_skill(role, "release")
+            self.assertTrue(result["valid"], result["issues"])
+            self.assertEqual(result["metrics"]["exact_original_cards"], 40)
+
+    def test_source_locator_text_cannot_fake_scene_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "locator-context-role"
+            build_fixture(role, "existing-character", 40, 15, 10)
+            library = role / "references" / "06-对白库.md"
+            text = library.read_text(encoding="utf-8")
+            text = text.replace(
+                "- 前置原文：追问前一句测试原文 1",
+                "- 前置原文：官方场景页以话数与场景标题定位",
+                1,
+            )
+            text = text.replace(
+                "- 触发话语：追问触发话语 1",
+                "- 触发话语：new_arrival；资料说明可定位",
+                1,
+            )
+            text = text.replace(
+                "- 后续原文：追问后一句测试原文 1",
+                "- 后续原文：该互动的后续由同一官方场景条目定位",
+                1,
+            )
+            write_text(library, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("dialogue.context_locator_only", codes)
+            self.assertIn("dialogue.complete_scene_context_missing", codes)
 
     def test_translated_or_unverified_text_cannot_count_as_original_language(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1184,6 +1306,32 @@ class PersonaToolTests(unittest.TestCase):
             self.assertEqual(selected["retrieval"]["confidence"], "low")
             self.assertGreater(selected["retrieval"]["dropped_weak_cards"], 0)
             self.assertIn("不用弱卡凑数", selected["retrieval"]["warning"])
+
+    def test_selector_can_use_verified_short_excerpt_for_exact_surface_act(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "direct-short-expression"
+            build_fixture(role, "existing-character", 80, 40, 20)
+            library = role / "references" / "06-对白库.md"
+            text = library.read_text(encoding="utf-8")
+            text = text.replace("- 场景完整度：完整", "- 场景完整度：孤立摘录", 1)
+            text = text.replace("- 前置原文：追问前一句测试原文 1", "- 前置原文：不适用", 1)
+            text = text.replace("- 触发话语：追问触发话语 1", "- 触发话语：不适用", 1)
+            text = text.replace("- 后续原文：追问后一句测试原文 1", "- 后续原文：不适用", 1)
+            text = text.replace("- 可直接使用：视场景", "- 可直接使用：仅短句", 1)
+            write_text(library, text)
+            selected = json.loads(
+                subprocess.check_output(
+                    [
+                        sys.executable, str(role / "scripts" / "select_dialogues.py"),
+                        "--root", str(role), "--speech-act", "greet", "--limit", "1", "--format", "json",
+                    ],
+                    text=True,
+                    encoding="utf-8",
+                )
+            )
+            self.assertEqual([item["card_id"] for item in selected["selected"]], ["TESTROLE-0001"])
+            self.assertEqual(selected["selected"][0]["evidence_confidence"], "medium")
+            self.assertIn("scope:direct-only", selected["selected"][0]["evidence_gaps"])
 
     def test_same_context_self_evaluation_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
