@@ -53,6 +53,8 @@ python install.py --agent codex,claude,opencode
 
 你选择前，Agent 不得联网、读取资料、初始化目录或开始蒸馏；选择 `2` 后必须等你输入自定义名称。如果你没有指定人物名，第一步也必须先让你直接设定人物名，此时不显示 1/2 选项。名称确认完成后，Persona.skill 才会沿用原名或使用自定义名，并持续完成“调研 → 蒸馏 → 生成 → 验证 → 修复 → 启用或注册”，不会停在目录初始化、资料不足或单次校验失败，也不需要你再次回复“继续”。
 
+创建任务启动后会锁定持续执行循环。只要内部门禁返回 `MUST_CONTINUE=true`、`FINAL_REPORT_ALLOWED=false` 或 `RESPONSE_MODE=CONTINUE_TOOL_LOOP`，Agent 必须立即继续下一项工具工作，不能把阶段性进度当成交付，也不能等待你说“继续”。你询问“为什么停了”或“现在到哪了”只会得到简短状态说明，之后仍会在同一轮继续；只有 `completion-gate` 返回 `RESPONSE_MODE=FINAL_REPORT`、`CREATE_LOOP_LOCK=released` 和 `TERMINAL_ALLOWED=true` 才能结束创建。
+
 创建通过后，完整启用型运行时会让角色立即作用于当前会话，并写入当前 Runtime 的用户级全局绑定；以后新会话无需再次调用 Persona.skill。绑定前已经打开的其他旧会话无法自动改变，需要重启或重新加载。如果只想生成文件，请明确说“只创建不启用”。
 
 完整启用型运行时包括 Codex App/CLI、Claude Code、OpenCode、WorkBuddy、CodeBuddy、Kimi Code、GitHub Copilot、Gemini CLI、Cline、OpenClaw 和 Hermes。MiMo Code、Cursor、TRAE、QoderWork 与 Deep Code 当前公开提供 Skill 加载，但没有可由脚本安全维护的用户级全局人格文件；Persona.skill 会正式校验并注册角色，随后由你在会话中点名角色 Skill，不会把“已安装”冒充成“已全局启用”。

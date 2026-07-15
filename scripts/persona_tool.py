@@ -118,6 +118,7 @@ ALLOWED_QUALITIES = ALLOWED_ORIGINAL_QUALITIES | {"译本参考", "原创确认"
 ALLOWED_MEDIA = {"视听", "文字", "混合", "公开表达", "原创"}
 ALLOWED_PERSONA_TYPES = {
     "existing-character",
+    "composite-character",
     "original-persona",
     "real-person-simulation",
     "composite-original",
@@ -347,12 +348,16 @@ def cmd_name_gate(args: argparse.Namespace) -> int:
                 print("NAME_CHOICE=none")
                 print("NAME_GATE_REQUIRED=false")
                 print("MUST_WAIT_FOR_NAME_CHOICE=false")
+                print("CREATE_LOOP_LOCK=active")
+                print("RESPONSE_MODE=CONTINUE_TOOL_LOOP")
                 return 0
             print("NAME_GATE_STATUS=awaiting-name")
             print("当前创建请求没有指定人物名，创建前必须先设定人物名。")
             print("请直接输入人物名：")
             print("NAME_GATE_REQUIRED=true")
             print("MUST_WAIT_FOR_NAME=true")
+            print("CREATE_LOOP_LOCK=waiting-for-user-name")
+            print("RESPONSE_MODE=WAIT_FOR_NAME")
             print("禁止在设定人物名之前联网、读取资料、初始化目录、蒸馏或生成角色。")
             return 0
         print("NAME_GATE_STATUS=awaiting-choice")
@@ -362,6 +367,8 @@ def cmd_name_gate(args: argparse.Namespace) -> int:
         print("2、自定义角色名（用户直接输入名字）")
         print("NAME_GATE_REQUIRED=true")
         print("MUST_WAIT_FOR_NAME_CHOICE=true")
+        print("CREATE_LOOP_LOCK=waiting-for-user-name-choice")
+        print("RESPONSE_MODE=WAIT_FOR_NAME_CHOICE")
         print("禁止在选择前联网、读取资料、初始化目录、蒸馏或生成角色。")
         return 0
 
@@ -386,6 +393,8 @@ def cmd_name_gate(args: argparse.Namespace) -> int:
     print(f"NAME_CHOICE={args.choice}")
     print("NAME_GATE_REQUIRED=false")
     print("MUST_WAIT_FOR_NAME_CHOICE=false")
+    print("CREATE_LOOP_LOCK=active")
+    print("RESPONSE_MODE=CONTINUE_TOOL_LOOP")
     return 0
 
 
@@ -457,6 +466,8 @@ def cmd_init(args: argparse.Namespace) -> int:
     print(f"PERSONA_WORKDIR={target}")
     print("PERSONA_BUILD_STATE=INCOMPLETE")
     print("MUST_CONTINUE=true")
+    print("CREATE_LOOP_LOCK=active")
+    print("RESPONSE_MODE=CONTINUE_TOOL_LOOP")
     print("TERMINAL_ALLOWED=false")
     print("USER_REPORT_ALLOWED=false")
     print("FINAL_REPORT_ALLOWED=false")
@@ -1089,7 +1100,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 issues,
                 "error" if level == "release" else "warning",
                 "persona.type_invalid",
-                "人格来源类型必须是 existing-character、original-persona、real-person-simulation 或 composite-original",
+                "人格来源类型必须是 existing-character、composite-character、original-persona、real-person-simulation 或 composite-original",
                 core_path,
                 root,
             )
@@ -1257,7 +1268,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             sources_path,
             root,
         )
-    if level == "release" and persona_type in {"existing-character", "real-person-simulation"}:
+    if level == "release" and persona_type in {"existing-character", "composite-character", "real-person-simulation"}:
         first_research_heading = RESEARCH_HEADING_RE.search(sources_text)
         research_header = sources_text[: first_research_heading.start()] if first_research_heading else sources_text
         for field in ("调研状态", "资料丰度", *REQUIRED_RESEARCH_AUDIT_FIELDS):
@@ -1489,7 +1500,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     path,
                     root,
                 )
-            if persona_type in {"existing-character", "real-person-simulation"}:
+            if persona_type in {"existing-character", "composite-character", "real-person-simulation"}:
                 if card_type and not PLACEHOLDER_RE.search(card_type) and card_type not in EXACT_CARD_TYPES:
                     add_issue(
                         issues,
@@ -1687,11 +1698,11 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     root,
                 )
             if (
-                persona_type in {"existing-character", "real-person-simulation"}
+                persona_type in {"existing-character", "composite-character", "real-person-simulation"}
                 and source_type
                 and not PLACEHOLDER_RE.search(source_type)
                 and not (
-                    (persona_type == "existing-character" and source_type in EXISTING_EXPRESSION_SOURCE_TYPES)
+                    (persona_type in {"existing-character", "composite-character"} and source_type in EXISTING_EXPRESSION_SOURCE_TYPES)
                     or (persona_type == "real-person-simulation" and source_type in REAL_PERSON_EXPRESSION_SOURCE_TYPES)
                 )
             ):
@@ -1820,7 +1831,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     path,
                     root,
                 )
-            if persona_type in {"existing-character", "real-person-simulation"}:
+            if persona_type in {"existing-character", "composite-character", "real-person-simulation"}:
                 if card_id not in exact_original_card_ids:
                     noncanonical_card_ids.add(card_id)
             elif card_id not in canonical_authored_card_ids:
@@ -1866,7 +1877,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 example[2],
                 root,
             )
-    if level == "release" and persona_type in {"existing-character", "real-person-simulation"}:
+    if level == "release" and persona_type in {"existing-character", "composite-character", "real-person-simulation"}:
         active_targets = profile_targets or RESEARCH_PROFILES["一般"]
         min_cards = int(active_targets["cards"])
         min_dimensions = int(active_targets["dimensions"])
@@ -2708,7 +2719,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     metrics["unique_original_expressions"] = len(verified_unique_originals)
     if (
         level == "release"
-        and persona_type in {"existing-character", "real-person-simulation"}
+        and persona_type in {"existing-character", "composite-character", "real-person-simulation"}
         and declared_formal_cards is not None
         and declared_formal_cards != len(verified_fidelity_card_ids)
     ):
@@ -3270,7 +3281,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         level,
     )
     missing_required_voice_layers = sorted(MINIMUM_VOICE_LAYERS - voice_layers)
-    if level == "release" and persona_type in {"existing-character", "real-person-simulation"} and missing_required_voice_layers:
+    if level == "release" and persona_type in {"existing-character", "composite-character", "real-person-simulation"} and missing_required_voice_layers:
         add_issue(
             issues,
             target_severity,
@@ -3507,7 +3518,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
 
     core_target, core_layer_target, core_evidence_target, voice_target, voice_layer_target, voice_evidence_target, mode_target, mode_dimension_target, anti_target = (
         (8, 6, 12, 8, 6, 12, 8, 6, 6)
-        if persona_type in {"existing-character", "real-person-simulation"}
+        if persona_type in {"existing-character", "composite-character", "real-person-simulation"}
         else (8, 6, 12, 8, 6, 12, 8, 6, 6)
     )
     for metric_name, actual, target, code, label, path in (
@@ -3643,7 +3654,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         level,
     )
 
-    if level == "release" and persona_type in {"existing-character", "real-person-simulation"}:
+    if level == "release" and persona_type in {"existing-character", "composite-character", "real-person-simulation"}:
         active_targets = profile_targets or RESEARCH_PROFILES["一般"]
         min_expression_cards = int(active_targets["cards"])
         min_unique_expressions = int(active_targets["unique"])
@@ -3717,7 +3728,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 root,
             )
     target_met = False
-    if persona_type == "existing-character":
+    if persona_type in {"existing-character", "composite-character"}:
         targets = profile_targets or RESEARCH_PROFILES["一般"]
         target_met = (
             research_profile == "丰富"
@@ -4034,6 +4045,8 @@ def cmd_research_gate(args: argparse.Namespace) -> int:
         print("PERSONA_RESEARCH_STATE=INCOMPLETE")
         print("RESEARCH_READY=false")
         print("MUST_CONTINUE=true")
+        print("CREATE_LOOP_LOCK=active")
+        print("RESPONSE_MODE=CONTINUE_TOOL_LOOP")
         print("TERMINAL_ALLOWED=false")
         print("USER_REPORT_ALLOWED=false")
         print("LOOP_STAGE=RESEARCH")
@@ -4058,6 +4071,8 @@ def cmd_research_gate(args: argparse.Namespace) -> int:
     print("PERSONA_RESEARCH_STATE=READY")
     print("RESEARCH_READY=true")
     print("MUST_CONTINUE=true")
+    print("CREATE_LOOP_LOCK=active")
+    print("RESPONSE_MODE=CONTINUE_TOOL_LOOP")
     print("TERMINAL_ALLOWED=false")
     print("USER_REPORT_ALLOWED=false")
     print("LOOP_STAGE=REDISTILL")
@@ -4135,6 +4150,8 @@ def emit_gate(
         deferred_codes = [code for code in error_codes if code not in stage_codes]
         print("PERSONA_BUILD_STATE=INCOMPLETE")
         print("MUST_CONTINUE=true")
+        print("CREATE_LOOP_LOCK=active")
+        print("RESPONSE_MODE=CONTINUE_TOOL_LOOP")
         print("TERMINAL_ALLOWED=false")
         print("USER_REPORT_ALLOWED=false")
         print("FINAL_REPORT_ALLOWED=false")
@@ -4157,6 +4174,8 @@ def emit_gate(
             pending_paths = None
         print("PERSONA_BUILD_STATE=VALIDATED_NOT_ENABLED")
         print("MUST_CONTINUE=true")
+        print("CREATE_LOOP_LOCK=active")
+        print("RESPONSE_MODE=CONTINUE_TOOL_LOOP")
         print("TERMINAL_ALLOWED=false")
         print("USER_REPORT_ALLOWED=false")
         print("FINAL_REPORT_ALLOWED=false")
@@ -4195,6 +4214,8 @@ def emit_gate(
             state = "VALIDATED_ACTIVATION_STALE" if activation_status == "enabled" else "VALIDATED_REGISTRATION_STALE"
             print("PERSONA_BUILD_STATE=" + state)
             print("MUST_CONTINUE=true")
+            print("CREATE_LOOP_LOCK=active")
+            print("RESPONSE_MODE=CONTINUE_TOOL_LOOP")
             print("TERMINAL_ALLOWED=false")
             print("USER_REPORT_ALLOWED=false")
             print("FINAL_REPORT_ALLOWED=false")
@@ -4211,6 +4232,8 @@ def emit_gate(
 
     print("PERSONA_BUILD_STATE=COMPLETE")
     print("MUST_CONTINUE=false")
+    print("CREATE_LOOP_LOCK=released")
+    print("RESPONSE_MODE=FINAL_REPORT")
     print("TERMINAL_ALLOWED=true")
     print("USER_REPORT_ALLOWED=true")
     print("FINAL_REPORT_ALLOWED=true")

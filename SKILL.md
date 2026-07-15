@@ -44,10 +44,16 @@ python scripts/persona_tool.py name-gate --custom-name "未指定原名时的新
 
 名称闸门完成后，才允许按已选名称继续；默认沿用原角色名和当前主要版本只表示用户选择了 `1`，不再表示可以跳过询问。
 
+### 强制持续执行回应锁
+
+名称闸门完成后，创建任务进入持续执行锁。`init`、`research-gate`、`iteration-gate` 或 `completion-gate` 只要输出 `MUST_CONTINUE=true`、`FINAL_REPORT_ALLOWED=false` 或 `RESPONSE_MODE=CONTINUE_TOOL_LOOP`，Agent 就不得发送阶段性收尾、不得把“已定位/已开始/仍在整理/资料不足”当成交付、不得等待用户说“继续”，必须立即按 `NEXT_ACTION` 或 `RETRY_COMMAND` 调用下一项工具。`CREATE_LOOP_LOCK=active` 期间，任何自然语言进度只能作为同一轮工具调用前的极短说明，不能结束当前轮。
+
+用户在锁定期间问“为什么停了”“现在到哪了”“是不是卡住”等状态问题时，这只是插入问题，不会释放锁：Agent 可以用一句话说明当前阶段，但说明后必须在同一轮继续调用工具，不能把解释回复后就停下。只有用户明确说“暂停/取消/停止创建”、出现必须由用户解除的硬阻塞，或最终 `completion-gate` 输出 `CREATE_LOOP_LOCK=released`、`RESPONSE_MODE=FINAL_REPORT`、`TERMINAL_ALLOWED=true`，才允许结束创建任务并发送完成报告。若工具输出 `RESPONSE_MODE=WAIT_FOR_NAME` 或 `WAIT_FOR_NAME_CHOICE`，只允许等待名称输入或选项，不得开始其他创建工作。
+
 调研阶段先运行独立 `research-gate`。它通过前只补原文、来源与真实语境，不生成后续规则或测试；通过后才进入蒸馏、验证与测试循环。每次准备结束当前轮或发送最终回复前，强制执行以下判断：
 
 ```text
-if release 校验通过 AND 必需测试实际通过 AND 已按要求启用:
+if release 校验通过 AND 必需测试实际通过 AND 已按要求启用 AND RESPONSE_MODE=FINAL_REPORT AND CREATE_LOOP_LOCK=released:
     允许完成交付
 elif 确实需要用户采取动作，且已经穷尽所有无需用户介入的安全工作:
     允许报告硬阻塞并提出唯一必要请求
@@ -61,7 +67,7 @@ else:
 
 用户在创建任务未完成时询问“为什么还没完成”“现在到哪了”“有什么限制”“是否卡住”或质疑当前结果，只是插入的状态问题，不会取消、暂停或替换原创建任务。先用一小段回答用户最后一个问题，然后必须在同一轮立即继续调用工具；不得把解释原因当成新的终点。只有用户明确说“暂停”“取消”“停止创建”或改变目标，才解除持续执行锁。发生上下文压缩或新一轮继续时，先运行 `iteration-gate` 恢复当前阶段，不重新初始化、不重复询问已经确定的身份或名称。
 
-从初始化后开始执行确定性循环：调研阶段每完成一批原文卡与语境就运行 `python scripts/persona_tool.py research-gate <角色目录>`；通过前继续扩大来源，不得提前蒸馏规则。通过后每完成一批规则修复或测试，运行 `python scripts/persona_tool.py iteration-gate <角色目录> --activation-status pending`。读取 `LOOP_STAGE`、`ERROR_CODES` 和 `NEXT_ACTION`，立即执行下一动作；只要输出 `MUST_CONTINUE=true` 就禁止最终回复和等待用户。`RESEARCH` 返回资料与语境层，`REDISTILL` 重建规则证据链，`TEST` 实际运行并保存评测原始记录，`ENABLE` 按运行时能力完成持久启用或 Skill 注册。循环没有任意次数上限；同类错误重复时换来源、查询词、媒介、切分、蒸馏方式或测试输入，而不是停止。
+从初始化后开始执行确定性循环：调研阶段每完成一批原文卡与语境就运行 `python scripts/persona_tool.py research-gate <角色目录>`；通过前继续扩大来源，不得提前蒸馏规则。通过后每完成一批规则修复或测试，运行 `python scripts/persona_tool.py iteration-gate <角色目录> --activation-status pending`。读取 `LOOP_STAGE`、`ERROR_CODES`、`RESPONSE_MODE` 和 `NEXT_ACTION`，立即执行下一动作；只要输出 `MUST_CONTINUE=true` 就禁止最终回复和等待用户，同时以 `RESPONSE_MODE=CONTINUE_TOOL_LOOP` 与 `CREATE_LOOP_LOCK=active` 作为回应锁的确定性信号。`RESEARCH` 返回资料与语境层，`REDISTILL` 重建规则证据链，`TEST` 实际运行并保存评测原始记录，`ENABLE` 按运行时能力完成持久启用或 Skill 注册。循环没有任意次数上限；同类错误重复时换来源、查询词、媒介、切分、蒸馏方式或测试输入，而不是停止。
 
 硬阻塞必须是用户才能解除的具体条件，例如：必须登录或取得付费资料权限、用户明确禁止扩大范围而现有资料无法完成、目标人物身份有歧义且不同选择会改变结果、目标路径无写入权限且没有安全替代位置。临时网络失败、单个站点不可用、某种媒介缺失、搜索结果不足或某项验证失败都不是硬阻塞；先换来源、语言、版本、检索方式或修复生成物。
 
@@ -191,7 +197,7 @@ python scripts/persona_tool.py reset-memory <稳定 ID|显示名|别名> --runti
 python scripts/persona_tool.py delete <稳定 ID|显示名|别名> --runtime <runtime> --yes
 ```
 
-`name-gate` 是创建流程的第一道硬闸门：有原名时只接受 1/2 选择，无原名时只接受用户直接设定的名称；它未完成时禁止调用 `init`。`init` 还会强制核对 `--name-choice`、`--source-name` 和显示名的一致性，拒绝绕过名称选择；它拒绝覆盖已有目录，生成 ASCII 小写稳定 ID `persona-<slug>`，并明确返回 `MUST_CONTINUE=true`。`research-gate` 只校验原始资料、来源、语境和调研扩展，阻止用薄弱语料提前批量生成规则与测试。`iteration-gate` 是后续创建循环控制器：只返回当前阶段的根错误代码与下一动作，不替 Agent 执行调研或修复。`validate` 会核对静态结构、逐项独立评测记录、真实对话数据哈希、检查器输出和独立质量门槛，但不能替 Agent 生成真实测试。完整启用型使用 `enable` 写注册表、全局绑定和可验证回执；Skill-only 型使用 `register` 并以 `registered` 运行门禁。`completion-gate` 会再次执行 release 校验并检查绑定回执或注册路径与哈希；用户明确要求“只创建不启用”时才可传 `--activation-status not-requested`。门禁未输出 `TERMINAL_ALLOWED=true` 时禁止最终交付。
+`name-gate` 是创建流程的第一道硬闸门：有原名时只接受 1/2 选择，无原名时只接受用户直接设定的名称；它未完成时禁止调用 `init`。`init` 还会强制核对 `--name-choice`、`--source-name` 和显示名的一致性，拒绝绕过名称选择；它拒绝覆盖已有目录，生成 ASCII 小写稳定 ID `persona-<slug>`，并明确返回 `MUST_CONTINUE=true` 与 `RESPONSE_MODE=CONTINUE_TOOL_LOOP`。`research-gate` 只校验原始资料、来源、语境和调研扩展，阻止用薄弱语料提前批量生成规则与测试。`iteration-gate` 是后续创建循环控制器：只返回当前阶段的根错误代码与下一动作，不替 Agent 执行调研或修复；门禁只要返回 `CREATE_LOOP_LOCK=active` 就不得以进度消息结束当前轮。`validate` 会核对静态结构、逐项独立评测记录、真实对话数据哈希、检查器输出和独立质量门槛，但不能替 Agent 生成真实测试。完整启用型使用 `enable` 写注册表、全局绑定和可验证回执；Skill-only 型使用 `register` 并以 `registered` 运行门禁。`completion-gate` 会再次执行 release 校验并检查绑定回执或注册路径与哈希；只有同时输出 `TERMINAL_ALLOWED=true`、`RESPONSE_MODE=FINAL_REPORT` 和 `CREATE_LOOP_LOCK=released` 才允许最终交付；用户明确要求“只创建不启用”时才可传 `--activation-status not-requested`。
 
 生成的角色 Skill 使用自己的选择器按场景召回少量卡片：
 

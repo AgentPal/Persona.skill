@@ -1,4 +1,4 @@
 interface:
   display_name: "Persona.skill"
   short_description: "蒸馏、验证并跨运行时管理可持续陪伴工作的角色人格 Skill"
-  default_prompt: "使用 $persona 创建或管理角色人格；创建第一步必须完成名称闸门：有用户指定原名时先让用户选择 1 直接使用原角色名或 2 自定义角色名并等待输入，没有指定原名时先让用户直接设定人物名；名称未确认前禁止联网、初始化或蒸馏。之后循环完成调研、蒸馏、修复和实测，再按当前运行时能力持久启用或注册，直到 completion-gate 核验绑定回执或注册哈希后允许交付；不要停在初始化或进度汇报。"
+  default_prompt: "使用 $persona 创建或管理角色人格；创建第一步必须完成名称闸门：有用户指定原名时先让用户选择 1 直接使用原角色名或 2 自定义角色名并等待输入，没有指定原名时先让用户直接设定人物名；名称未确认前禁止联网、初始化或蒸馏。创建启动后保持持续执行回应锁：任何 MUST_CONTINUE=true、FINAL_REPORT_ALLOWED=false 或 RESPONSE_MODE=CONTINUE_TOOL_LOOP 都只能继续工具循环，不能以阶段性进度结束或等待继续；只有 completion-gate 返回 RESPONSE_MODE=FINAL_REPORT、CREATE_LOOP_LOCK=released 和 TERMINAL_ALLOWED=true 才允许交付。之后循环完成调研、蒸馏、修复和实测，再按当前运行时能力持久启用或注册；不要停在初始化或进度汇报。"

@@ -1277,6 +1277,7 @@ class PersonaToolTests(unittest.TestCase):
             self.assertEqual(no_name.returncode, 0, no_name.stderr)
             self.assertIn("NAME_GATE_STATUS=awaiting-name", no_name.stdout)
             self.assertIn("请直接输入人物名", no_name.stdout)
+            self.assertIn("RESPONSE_MODE=WAIT_FOR_NAME", no_name.stdout)
             self.assertNotIn("1、直接使用原角色名", no_name.stdout)
 
             named = subprocess.run(
@@ -1291,6 +1292,7 @@ class PersonaToolTests(unittest.TestCase):
             self.assertIn("1、直接使用原角色名", named.stdout)
             self.assertIn("2、自定义角色名（用户直接输入名字）", named.stdout)
             self.assertIn("MUST_WAIT_FOR_NAME_CHOICE=true", named.stdout)
+            self.assertIn("RESPONSE_MODE=WAIT_FOR_NAME_CHOICE", named.stdout)
 
             bypass = subprocess.run(
                 [
@@ -1312,6 +1314,7 @@ class PersonaToolTests(unittest.TestCase):
             )
             self.assertEqual(original.returncode, 0, original.stderr)
             self.assertIn("DISPLAY_NAME=锦木千束", original.stdout)
+            self.assertIn("RESPONSE_MODE=CONTINUE_TOOL_LOOP", original.stdout)
 
             custom = subprocess.run(
                 [
@@ -1344,6 +1347,8 @@ class PersonaToolTests(unittest.TestCase):
             )
             self.assertEqual(unnamed_init.returncode, 0, unnamed_init.stderr)
             self.assertIn("PERSONA_BUILD_STATE=INCOMPLETE", unnamed_init.stdout)
+            self.assertIn("CREATE_LOOP_LOCK=active", unnamed_init.stdout)
+            self.assertIn("RESPONSE_MODE=CONTINUE_TOOL_LOOP", unnamed_init.stdout)
 
     def test_init_copies_selector_and_draft_validates(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1372,6 +1377,8 @@ class PersonaToolTests(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn("PERSONA_BUILD_STATE=INCOMPLETE", completed.stdout)
             self.assertIn("MUST_CONTINUE=true", completed.stdout)
+            self.assertIn("RESPONSE_MODE=CONTINUE_TOOL_LOOP", completed.stdout)
+            self.assertIn("CREATE_LOOP_LOCK=active", completed.stdout)
             self.assertIn("LOOP_STAGE=RESEARCH", completed.stdout)
             self.assertIn("TERMINAL_ALLOWED=false", completed.stdout)
             self.assertIn("USER_REPORT_ALLOWED=false", completed.stdout)
@@ -1421,6 +1428,8 @@ class PersonaToolTests(unittest.TestCase):
             self.assertNotEqual(iteration.returncode, 0)
             self.assertIn("MUST_CONTINUE=true", iteration.stdout)
             self.assertIn("FINAL_REPORT_ALLOWED=false", iteration.stdout)
+            self.assertIn("CREATE_LOOP_LOCK=active", iteration.stdout)
+            self.assertIn("RESPONSE_MODE=CONTINUE_TOOL_LOOP", iteration.stdout)
             self.assertIn("LOOP_STAGE=", iteration.stdout)
             self.assertIn("NEXT_ACTION=", iteration.stdout)
 
@@ -1438,6 +1447,7 @@ class PersonaToolTests(unittest.TestCase):
             self.assertIn("PERSONA_BUILD_STATE=VALIDATED_NOT_ENABLED", pending.stdout)
             self.assertIn("TERMINAL_ALLOWED=false", pending.stdout)
             self.assertIn("LOOP_STAGE=ENABLE", pending.stdout)
+            self.assertIn("RESPONSE_MODE=CONTINUE_TOOL_LOOP", pending.stdout)
 
             enabled = subprocess.run(
                 [
@@ -1462,6 +1472,8 @@ class PersonaToolTests(unittest.TestCase):
             self.assertIn("TERMINAL_ALLOWED=true", allowed.stdout)
             self.assertIn("USER_REPORT_ALLOWED=true", allowed.stdout)
             self.assertIn("MUST_CONTINUE=false", allowed.stdout)
+            self.assertIn("CREATE_LOOP_LOCK=released", allowed.stdout)
+            self.assertIn("RESPONSE_MODE=FINAL_REPORT", allowed.stdout)
             self.assertIn("LOOP_STAGE=COMPLETE", allowed.stdout)
 
     def test_cli_lifecycle_smoke_for_all_runtimes(self) -> None:
@@ -2869,6 +2881,10 @@ class PersonaToolTests(unittest.TestCase):
         self.assertIn("不能等待用户说“继续”", creator)
         self.assertIn("只是插入的状态问题，不会取消、暂停或替换原创建任务", creator)
         self.assertIn("只要输出 `MUST_CONTINUE=true` 就禁止最终回复和等待用户", creator)
+        self.assertIn("RESPONSE_MODE=CONTINUE_TOOL_LOOP", creator)
+        self.assertIn("CREATE_LOOP_LOCK=active", creator)
+        self.assertIn("RESPONSE_MODE=FINAL_REPORT", creator)
+        self.assertIn("CREATE_LOOP_LOCK=released", creator)
         self.assertIn("发生上下文压缩或新一轮继续时，先运行 `iteration-gate`", creator)
         self.assertIn("completion-gate", creator)
         self.assertIn("iteration-gate", creator)
