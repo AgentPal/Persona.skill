@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""User-scope Persona.skill lifecycle for Codex, Claude Code, and OpenCode.
+"""User-scope Persona.skill lifecycle across supported agent runtimes.
 
 The module intentionally uses only the Python standard library and keeps each
 runtime's registry, activation receipt, and bounded continuity state separate.
@@ -20,16 +20,125 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 SCHEMA_VERSION = 1
-SUPPORTED_RUNTIMES = ("codex", "claude", "opencode")
+SUPPORTED_RUNTIMES = (
+    "codex",
+    "claude",
+    "opencode",
+    "workbuddy",
+    "codebuddy",
+    "kimi-code",
+    "mimo-code",
+    "github-copilot",
+    "gemini",
+    "cursor",
+    "cline",
+    "trae",
+    "qoderwork",
+    "deepcode",
+    "openclaw",
+    "hermes",
+)
+PERSISTENT_ACTIVATION_RUNTIMES = (
+    "codex",
+    "claude",
+    "opencode",
+    "workbuddy",
+    "codebuddy",
+    "kimi-code",
+    "github-copilot",
+    "gemini",
+    "cline",
+    "openclaw",
+    "hermes",
+)
+SKILL_ONLY_RUNTIMES = tuple(
+    runtime for runtime in SUPPORTED_RUNTIMES if runtime not in PERSISTENT_ACTIVATION_RUNTIMES
+)
+RUNTIME_LABELS = {
+    "codex": "Codex App / CLI",
+    "claude": "Claude Code",
+    "opencode": "OpenCode",
+    "workbuddy": "WorkBuddy",
+    "codebuddy": "CodeBuddy",
+    "kimi-code": "Kimi Code",
+    "mimo-code": "MiMo Code",
+    "github-copilot": "GitHub Copilot",
+    "gemini": "Gemini CLI",
+    "cursor": "Cursor",
+    "cline": "Cline",
+    "trae": "TRAE",
+    "qoderwork": "QoderWork",
+    "deepcode": "Deep Code",
+    "openclaw": "OpenClaw",
+    "hermes": "Hermes",
+}
+
+
+def _runtime_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.strip().lower())
+
+
+_RUNTIME_ALIASES = {
+    "codex": ("codex", "codex-app", "codex-cli"),
+    "claude": ("claude", "claude-code"),
+    "opencode": ("opencode", "open-code"),
+    "workbuddy": ("workbuddy", "work-buddy"),
+    "codebuddy": ("codebuddy", "code-buddy"),
+    "kimi-code": ("kimi", "kimi-code", "kimicode"),
+    "mimo-code": ("mimo", "mimo-code", "mimocode", "mimo-codex", "mimocodex"),
+    "github-copilot": ("copilot", "github-copilot"),
+    "gemini": ("gemini", "gemini-cli"),
+    "cursor": ("cursor",),
+    "cline": ("cline",),
+    "trae": ("trae", "trae-cn"),
+    "qoderwork": ("qoderwork", "qoder-work"),
+    "deepcode": ("deepcode", "deep-code"),
+    "openclaw": ("openclaw", "open-claw"),
+    "hermes": ("hermes", "hermes-agent"),
+}
+RUNTIME_ALIAS_MAP = {
+    _runtime_key(alias): runtime
+    for runtime, aliases in _RUNTIME_ALIASES.items()
+    for alias in aliases
+}
+
+RUNTIME_PATH_ENV_KEYS = (
+    "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
+    "OPENCODE_CONFIG_DIR",
+    "XDG_CONFIG_HOME",
+    "KIMI_CODE_HOME",
+    "MIMOCODE_HOME",
+    "LOCALAPPDATA",
+    "OPENCLAW_HOME",
+    "OPENCLAW_WORKSPACE",
+    "HERMES_HOME",
+) + tuple("PERSONA_%s_HOME" % runtime.upper().replace("-", "_") for runtime in SUPPORTED_RUNTIMES) + (
+    "PERSONA_OPENCLAW_WORKSPACE",
+)
 ROLE_ID_RE = re.compile(r"^persona-[a-z0-9]+(?:-[a-z0-9]+)*$")
 START_MARKER = "<!-- persona.skill:binding:start -->"
 END_MARKER = "<!-- persona.skill:binding:end -->"
 SEPARATOR_MARKER_RE = re.compile(r"<!-- persona\.skill:binding:separator-added:([01]) -->")
 FORBIDDEN_STATE_KEYS = {"chat", "conversation", "history", "messages", "transcript", "raw_chat"}
+# Reject compound spellings too (``chat_log``, ``raw_messages`` and
+# ``conversation_history``) so a caller cannot bypass the no-transcript
+# contract by inventing a slightly different field name.
+FORBIDDEN_STATE_KEY_PARTS = ("chat", "conversation", "history", "message", "transcript", "raw_chat", "raw_message", "dialogue_log")
 STATE_LIST_LIMITS = {
     "commitments": 12,
     "open_threads": 12,
     "recent_expression_ids": 50,
+    "shared_callbacks": 8,
+    "recent_background_ids": 24,
+}
+STATE_TEXT_LIMITS = {
+    "relationship_summary": 1000,
+    "emotion_residue": 300,
+    "emotion_cause_summary": 300,
+    "relationship_stage": 100,
+    "unresolved_tension": 500,
+    "trust": 100,
 }
 
 
@@ -47,10 +156,12 @@ class RuntimePaths:
     config_root: Path
     skills_root: Path
     data_root: Path
-    instruction_path: Path
+    instruction_path: Optional[Path]
     registry_path: Path
     receipt_path: Path
     state_root: Path
+    supports_persistent_activation: bool
+    activation_note: str
 
 
 @dataclass(frozen=True)
@@ -89,41 +200,141 @@ def _nonempty(path: Path) -> bool:
         return False
 
 
+def normalize_runtime(value: str) -> str:
+    """Return a canonical runtime ID while accepting common product aliases."""
+    key = _runtime_key(value)
+    runtime = RUNTIME_ALIAS_MAP.get(key)
+    if runtime is None:
+        raise LifecycleError("不支持的运行时：%s" % value)
+    return runtime
+
+
+def _runtime_home_override(values: Mapping[str, str], runtime: str) -> Optional[Path]:
+    key = "PERSONA_%s_HOME" % runtime.upper().replace("-", "_")
+    return _env_path(values, key)
+
+
+def _mimo_config_root(user_home: Path, values: Mapping[str, str]) -> Path:
+    explicit = _env_path(values, "MIMOCODE_HOME")
+    if explicit:
+        return explicit
+    local_app_data = _env_path(values, "LOCALAPPDATA")
+    if local_app_data:
+        return local_app_data / "mimocode"
+    xdg = _env_path(values, "XDG_CONFIG_HOME")
+    if xdg:
+        return xdg / "mimocode"
+    if os.name == "nt":
+        return user_home / "AppData" / "Local" / "mimocode"
+    return user_home / ".config" / "mimocode"
+
+
 def resolve_runtime_paths(
     runtime: str,
     home: Optional[Path] = None,
     env: Optional[Mapping[str, str]] = None,
+    skill_root: Optional[Path] = None,
 ) -> RuntimePaths:
     """Resolve user-scope paths without writing anything."""
-    if runtime not in SUPPORTED_RUNTIMES:
-        raise LifecycleError("不支持的运行时：%s" % runtime)
-    values = dict(os.environ if env is None else env)
+    runtime = normalize_runtime(runtime)
+    # An explicit HOME is an isolated test/install scope.  Do not let a
+    # process-wide runtime variable (CODEX_HOME, XDG_CONFIG_HOME, etc.) leak
+    # back into that scope; callers can still pass env overrides when no HOME
+    # override is requested.
+    # An explicit mapping is a deliberate test/integration override and is
+    # honoured even with ``home``.  Only ambient process variables are
+    # suppressed by an isolated HOME (the CLI passes env=None).
+    values = dict(env) if env is not None else ({} if home is not None else dict(os.environ))
     user_home = Path(home).expanduser().resolve() if home is not None else Path.home().resolve()
+    override = _runtime_home_override(values, runtime)
 
     if runtime == "codex":
-        config_root = _env_path(values, "CODEX_HOME") or user_home / ".codex"
-        override = config_root / "AGENTS.override.md"
-        instruction_path = override if _nonempty(override) else config_root / "AGENTS.md"
+        config_root = override or _env_path(values, "CODEX_HOME") or user_home / ".codex"
+        instruction_override = config_root / "AGENTS.override.md"
+        instruction_path = instruction_override if _nonempty(instruction_override) else config_root / "AGENTS.md"
     elif runtime == "claude":
-        config_root = _env_path(values, "CLAUDE_CONFIG_DIR") or user_home / ".claude"
+        config_root = override or _env_path(values, "CLAUDE_CONFIG_DIR") or user_home / ".claude"
         instruction_path = config_root / "CLAUDE.md"
-    else:
+    elif runtime == "opencode":
         explicit = _env_path(values, "OPENCODE_CONFIG_DIR")
         xdg = _env_path(values, "XDG_CONFIG_HOME")
-        config_root = explicit or ((xdg / "opencode") if xdg else user_home / ".config" / "opencode")
+        config_root = override or explicit or ((xdg / "opencode") if xdg else user_home / ".config" / "opencode")
         instruction_path = config_root / "AGENTS.md"
+    elif runtime == "workbuddy":
+        config_root = override or user_home / ".workbuddy"
+        instruction_path = config_root / "SOUL.md"
+    elif runtime == "codebuddy":
+        config_root = override or user_home / ".codebuddy"
+        instruction_path = config_root / "CODEBUDDY.md"
+    elif runtime == "kimi-code":
+        config_root = override or _env_path(values, "KIMI_CODE_HOME") or user_home / ".kimi-code"
+        instruction_path = config_root / "AGENTS.md"
+    elif runtime == "mimo-code":
+        config_root = override or _mimo_config_root(user_home, values)
+        instruction_path = None
+    elif runtime == "github-copilot":
+        config_root = override or user_home / ".copilot"
+        instruction_path = config_root / "copilot-instructions.md"
+    elif runtime == "gemini":
+        config_root = override or user_home / ".gemini"
+        instruction_path = config_root / "GEMINI.md"
+    elif runtime == "cursor":
+        config_root = override or user_home / ".cursor"
+        instruction_path = None
+    elif runtime == "cline":
+        config_root = override or user_home / ".cline"
+        instruction_path = user_home / "Documents" / "Cline" / "Rules" / "persona-skill.md"
+    elif runtime == "trae":
+        config_root = override
+        if config_root is None and skill_root is not None:
+            resolved_skill = Path(skill_root).expanduser().resolve()
+            for candidate in (user_home / ".trae", user_home / ".trae-cn"):
+                if is_within(resolved_skill, candidate / "skills"):
+                    config_root = candidate
+                    break
+        config_root = config_root or user_home / ".trae"
+        instruction_path = None
+    elif runtime == "qoderwork":
+        config_root = override or user_home / ".qoderwork"
+        instruction_path = None
+    elif runtime == "deepcode":
+        config_root = override or user_home / ".deepcode"
+        instruction_path = None
+    elif runtime == "openclaw":
+        config_root = override or _env_path(values, "OPENCLAW_HOME") or user_home / ".openclaw"
+        workspace = (
+            _env_path(values, "PERSONA_OPENCLAW_WORKSPACE")
+            or _env_path(values, "OPENCLAW_WORKSPACE")
+            or config_root / "workspace"
+        )
+        instruction_path = workspace / "AGENTS.md"
+    else:  # hermes
+        config_root = override or _env_path(values, "HERMES_HOME") or user_home / ".hermes"
+        instruction_path = config_root / "SOUL.md"
 
     config_root = config_root.resolve()
+    if runtime in {"mimo-code", "deepcode"}:
+        skills_root = (user_home / ".agents" / "skills").resolve()
+    else:
+        skills_root = (config_root / "skills").resolve()
     data_root = config_root / "persona"
+    supports_persistent = runtime in PERSISTENT_ACTIVATION_RUNTIMES
+    activation_note = (
+        "支持用户级持久人格绑定"
+        if supports_persistent
+        else "该运行时公开支持 Skill，但没有可安全自动写入的用户级全局人格文件；请注册后显式调用角色 Skill"
+    )
     return RuntimePaths(
         runtime=runtime,
         config_root=config_root,
-        skills_root=config_root / "skills",
+        skills_root=skills_root,
         data_root=data_root,
-        instruction_path=instruction_path,
+        instruction_path=instruction_path.resolve() if instruction_path is not None else None,
         registry_path=data_root / "registry.json",
         receipt_path=data_root / "receipts" / "activation.json",
         state_root=data_root / "state",
+        supports_persistent_activation=supports_persistent,
+        activation_note=activation_note,
     )
 
 
@@ -135,22 +346,34 @@ def detect_runtime(
 ) -> Tuple[str, str]:
     """Return (runtime, evidence); refuse ambiguous auto-detection."""
     if requested != "auto":
-        if requested not in SUPPORTED_RUNTIMES:
-            raise LifecycleError("不支持的运行时：%s" % requested)
-        return requested, "explicit"
+        return normalize_runtime(requested), "explicit"
 
     values = dict(os.environ if env is None else env)
     explicit = values.get("PERSONA_RUNTIME", "").strip().lower()
     if explicit:
-        if explicit not in SUPPORTED_RUNTIMES:
-            raise LifecycleError("PERSONA_RUNTIME 不是受支持值：%s" % explicit)
-        return explicit, "PERSONA_RUNTIME"
+        try:
+            return normalize_runtime(explicit), "PERSONA_RUNTIME"
+        except LifecycleError as exc:
+            raise LifecycleError("PERSONA_RUNTIME 不是受支持值：%s" % explicit) from exc
 
     candidates: List[Tuple[str, str]] = []
     signals = (
-        ("codex", ("CODEX_HOME", "CODEX_THREAD_ID")),
-        ("claude", ("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_ENTRYPOINT")),
-        ("opencode", ("OPENCODE_CONFIG_DIR", "OPENCODE", "OPENCODE_PID")),
+        ("codex", ("CODEX_HOME", "CODEX_THREAD_ID", "PERSONA_CODEX_HOME")),
+        ("claude", ("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_ENTRYPOINT", "PERSONA_CLAUDE_HOME")),
+        ("opencode", ("OPENCODE_CONFIG_DIR", "OPENCODE", "OPENCODE_PID", "PERSONA_OPENCODE_HOME")),
+        ("workbuddy", ("PERSONA_WORKBUDDY_HOME",)),
+        ("codebuddy", ("PERSONA_CODEBUDDY_HOME",)),
+        ("kimi-code", ("KIMI_CODE_HOME", "PERSONA_KIMI_CODE_HOME")),
+        ("mimo-code", ("MIMOCODE_HOME", "PERSONA_MIMO_CODE_HOME")),
+        ("github-copilot", ("PERSONA_GITHUB_COPILOT_HOME",)),
+        ("gemini", ("PERSONA_GEMINI_HOME",)),
+        ("cursor", ("PERSONA_CURSOR_HOME",)),
+        ("cline", ("CLINE_DATA_DIR", "PERSONA_CLINE_HOME")),
+        ("trae", ("PERSONA_TRAE_HOME",)),
+        ("qoderwork", ("PERSONA_QODERWORK_HOME",)),
+        ("deepcode", ("PERSONA_DEEPCODE_HOME",)),
+        ("openclaw", ("OPENCLAW_HOME", "OPENCLAW_WORKSPACE", "PERSONA_OPENCLAW_HOME")),
+        ("hermes", ("HERMES_HOME", "PERSONA_HERMES_HOME")),
     )
     for runtime, keys in signals:
         present = [key for key in keys if values.get(key, "").strip()]
@@ -160,7 +383,7 @@ def detect_runtime(
     if skill_root is not None:
         root = Path(skill_root).resolve()
         for runtime in SUPPORTED_RUNTIMES:
-            paths = resolve_runtime_paths(runtime, home=home, env=values)
+            paths = resolve_runtime_paths(runtime, home=home, env=values, skill_root=root)
             if is_within(root, paths.skills_root):
                 candidates.append((runtime, "skill-path"))
 
@@ -170,8 +393,8 @@ def detect_runtime(
         evidence = "+".join(item[1] for item in candidates if item[0] == runtime)
         return runtime, evidence
     if len(unique) > 1:
-        raise LifecycleError("检测到多个运行时信号；请显式传入 --runtime codex|claude|opencode")
-    raise LifecycleError("无法可靠识别当前运行时；请显式传入 --runtime codex|claude|opencode")
+        raise LifecycleError("检测到多个运行时信号；请显式传入 --runtime <runtime-id>")
+    raise LifecycleError("无法可靠识别当前运行时；请显式传入 --runtime <runtime-id>")
 
 
 def is_within(path: Path, parent: Path) -> bool:
@@ -179,6 +402,13 @@ def is_within(path: Path, parent: Path) -> bool:
         return os.path.commonpath((str(path.resolve()), str(parent.resolve()))) == str(parent.resolve())
     except (OSError, ValueError):
         return False
+
+
+def persistent_instruction_path(paths: RuntimePaths) -> Path:
+    """Return the safe binding target or fail before any lifecycle mutation."""
+    if not paths.supports_persistent_activation or paths.instruction_path is None:
+        raise LifecycleError("%s：%s" % (RUNTIME_LABELS[paths.runtime], paths.activation_note))
+    return paths.instruction_path
 
 
 def _read_document(path: Path) -> TextDocument:
@@ -474,6 +704,7 @@ def register_role(
 
 
 def enable_registered_role(paths: RuntimePaths, query: str) -> Dict[str, Any]:
+    instruction_path = persistent_instruction_path(paths)
     registry = load_registry(paths)
     role = resolve_role(registry, query)
     role_path = Path(role["path"]).resolve()
@@ -487,7 +718,7 @@ def enable_registered_role(paths: RuntimePaths, query: str) -> Dict[str, Any]:
     else:
         _write_json(state_path, empty_state(role["id"]))
     block = binding_block(paths.runtime, role, state_path)
-    binding = apply_binding(paths.instruction_path, block)
+    binding = apply_binding(instruction_path, block)
     registry = load_registry(paths)
     registry["active_role_id"] = role["id"]
     role["updated_at"] = utc_now()
@@ -500,7 +731,7 @@ def enable_registered_role(paths: RuntimePaths, query: str) -> Dict[str, Any]:
         "role_path": str(role_path),
         "role_sha256": current_hash,
         "validation_hash": role["validation_hash"],
-        "binding_path": str(paths.instruction_path.resolve()),
+        "binding_path": str(instruction_path.resolve()),
         "binding_file_sha256": binding["file_sha256"],
         "binding_block_sha256": binding["block_sha256"],
         "enabled_at": utc_now(),
@@ -513,9 +744,10 @@ def enable_registered_role(paths: RuntimePaths, query: str) -> Dict[str, Any]:
 
 
 def disable_active_role(paths: RuntimePaths) -> Dict[str, Any]:
+    instruction_path = persistent_instruction_path(paths)
     registry = load_registry(paths)
     active = registry.get("active_role_id")
-    binding = remove_binding(paths.instruction_path)
+    binding = remove_binding(instruction_path)
     registry["active_role_id"] = None
     save_registry(paths, registry)
     if paths.receipt_path.exists():
@@ -567,6 +799,9 @@ def verify_activation(
     expected_role_hash: Optional[str] = None,
 ) -> Dict[str, Any]:
     errors: List[str] = []
+    if not paths.supports_persistent_activation or paths.instruction_path is None:
+        return {"valid": False, "errors": [paths.activation_note], "capability": "skill-only"}
+    instruction_path = paths.instruction_path
     try:
         registry = load_registry(paths)
     except LifecycleError as exc:
@@ -591,7 +826,7 @@ def verify_activation(
         errors.append("回执运行时或角色 ID 与注册表不匹配")
     if Path(str(receipt.get("role_path", ""))).resolve() != registered_path:
         errors.append("回执角色路径与注册表不匹配")
-    if Path(str(receipt.get("binding_path", ""))).resolve() != paths.instruction_path.resolve():
+    if Path(str(receipt.get("binding_path", ""))).resolve() != instruction_path.resolve():
         errors.append("回执绑定路径不是当前实际生效文件")
     if not registered_path.is_dir():
         errors.append("活动角色目录不存在")
@@ -604,7 +839,7 @@ def verify_activation(
         if expected_role_hash and current_role_hash != expected_role_hash:
             errors.append("角色哈希与完成门禁结果不匹配")
     try:
-        block = inspect_binding(paths.instruction_path)
+        block = inspect_binding(instruction_path)
     except LifecycleError as exc:
         errors.append(str(exc))
         block = None
@@ -615,12 +850,54 @@ def verify_activation(
             errors.append("绑定块哈希与回执不匹配")
         if role["id"] not in block or str(registered_path / "SKILL.md") not in block:
             errors.append("绑定块未指向活动角色")
-    if paths.instruction_path.is_file():
-        if receipt.get("binding_file_sha256") != sha256_file(paths.instruction_path):
+    if instruction_path.is_file():
+        if receipt.get("binding_file_sha256") != sha256_file(instruction_path):
             errors.append("全局指令文件在启用后已变化，回执已过期")
     else:
         errors.append("实际生效的全局指令文件不存在")
     return {"valid": not errors, "errors": errors, "role_id": active, "receipt": receipt}
+
+
+def verify_registration(
+    paths: RuntimePaths,
+    role_path: Path,
+    expected_role_hash: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Verify a role registration when a runtime has Skill loading but no file binding."""
+    errors: List[str] = []
+    try:
+        registry = load_registry(paths)
+    except LifecycleError as exc:
+        return {"valid": False, "errors": [str(exc)]}
+    resolved = Path(role_path).expanduser().resolve()
+    matches = [
+        role for role in registry["roles"].values()
+        if Path(str(role.get("path", ""))).resolve() == resolved
+    ]
+    if len(matches) != 1:
+        errors.append("注册表中没有唯一匹配当前角色路径的条目")
+        return {"valid": False, "errors": errors}
+    role = dict(matches[0])
+    if (
+        resolved.parent != paths.skills_root.resolve()
+        or resolved.name != role.get("id")
+        or not ROLE_ID_RE.fullmatch(resolved.name)
+    ):
+        errors.append("注册角色不在当前运行时 Skills 根目录直属安全位置")
+    if not resolved.is_dir() or not (resolved / "SKILL.md").is_file():
+        errors.append("已注册角色目录不存在或不完整")
+    else:
+        current_hash = directory_hash(resolved)
+        if role.get("validation_hash") != current_hash:
+            errors.append("正式校验哈希已过期")
+        if expected_role_hash and current_hash != expected_role_hash:
+            errors.append("角色哈希与完成门禁结果不匹配")
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "role_id": role.get("id"),
+        "capability": "skill-only",
+    }
 
 
 def empty_state(role_id: str) -> Dict[str, Any]:
@@ -629,10 +906,16 @@ def empty_state(role_id: str) -> Dict[str, Any]:
         "role_id": role_id,
         "relationship_summary": "",
         "emotion_residue": "",
+        "emotion_intensity": 0,
+        "emotion_cause_summary": "",
+        "relationship_stage": "",
+        "unresolved_tension": "",
         "trust": "",
         "commitments": [],
         "open_threads": [],
         "recent_expression_ids": [],
+        "shared_callbacks": [],
+        "recent_background_ids": [],
         "updated_at": None,
     }
 
@@ -642,7 +925,9 @@ def load_state(paths: RuntimePaths, role_id: str) -> Dict[str, Any]:
     state = _read_json(path, empty_state(role_id))
     if state.get("schema_version") != SCHEMA_VERSION or state.get("role_id") != role_id:
         raise LifecycleError("角色连续状态 schema 或角色 ID 不匹配：%s" % path)
-    return state
+    migrated = empty_state(role_id)
+    migrated.update(state)
+    return migrated
 
 
 def _bounded_text(value: Any, field: str, limit: int) -> str:
@@ -654,27 +939,35 @@ def _bounded_text(value: Any, field: str, limit: int) -> str:
 
 
 def update_state(paths: RuntimePaths, role_id: str, changes: Mapping[str, Any]) -> Dict[str, Any]:
-    forbidden = FORBIDDEN_STATE_KEYS.intersection(str(key).casefold() for key in changes)
+    forbidden = {
+        str(key)
+        for key in changes
+        if str(key).casefold() in FORBIDDEN_STATE_KEYS
+        or any(part in re.sub(r"[^a-z0-9]+", "_", str(key).casefold()) for part in FORBIDDEN_STATE_KEY_PARTS)
+    }
     if forbidden:
         raise LifecycleError("连续状态禁止保存完整聊天记录字段：%s" % ", ".join(sorted(forbidden)))
-    allowed = {"relationship_summary", "emotion_residue", "trust"}.union(STATE_LIST_LIMITS)
+    allowed = set(STATE_TEXT_LIMITS).union(STATE_LIST_LIMITS).union({"emotion_intensity"})
     unknown = set(changes).difference(allowed)
     if unknown:
         raise LifecycleError("未知连续状态字段：%s" % ", ".join(sorted(unknown)))
     state = load_state(paths, role_id)
     updated = dict(state)
-    for field in ("relationship_summary", "emotion_residue"):
+    for field, limit in STATE_TEXT_LIMITS.items():
         if field in changes:
-            updated[field] = _bounded_text(changes[field], field, 1000 if field == "relationship_summary" else 300)
-    if "trust" in changes:
-        updated["trust"] = _bounded_text(changes["trust"], "trust", 100)
+            updated[field] = _bounded_text(changes[field], field, limit)
+    if "emotion_intensity" in changes:
+        value = changes["emotion_intensity"]
+        if isinstance(value, bool) or not isinstance(value, int) or value not in range(0, 4):
+            raise LifecycleError("连续状态字段 emotion_intensity 必须是 0–3 的整数")
+        updated["emotion_intensity"] = value
     for field, limit in STATE_LIST_LIMITS.items():
         if field not in changes:
             continue
         value = changes[field]
         if not isinstance(value, list):
             raise LifecycleError("连续状态字段 %s 必须是数组" % field)
-        item_limit = 128 if field == "recent_expression_ids" else 300
+        item_limit = 128 if field in {"recent_expression_ids", "recent_background_ids"} else 300
         normalized = [_bounded_text(item, field, item_limit) for item in value]
         normalized = [item for item in normalized if item]
         updated[field] = normalized[-limit:]

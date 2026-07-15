@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 
-CHECKER_CONTRACT_VERSION = 2
+CHECKER_CONTRACT_VERSION = 3
 ANTI_HEADING_RE = re.compile(r"^###\s+(ANTI-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+EXPR_HEADING_RE = re.compile(r"^###\s+(EXPR-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+CARD_HEADING_RE = re.compile(r"^##\s+([A-Z0-9][A-Z0-9-]*-\d{4})\s*$", re.MULTILINE | re.IGNORECASE)
 AI_PHRASES = (
     "综合来看", "综上所述", "基于以上", "基于上述", "需要注意的是", "值得注意的是",
     "接下来我们", "总体而言", "从这个角度", "在此基础上", "为了确保", "建议你",
@@ -70,6 +72,86 @@ def iter_anti_blocks(text: str) -> Iterable[tuple[str, str]]:
         yield match.group(1).upper(), text[match.end() : end]
 
 
+def iter_blocks(text: str, pattern: re.Pattern[str]) -> Iterable[tuple[str, str]]:
+    matches = list(pattern.finditer(text))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        yield match.group(1).upper(), text[match.end() : end]
+
+
+def asset_version(root: Path) -> int:
+    path = root / "references" / "01-角色核心.md"
+    if not path.is_file():
+        return 1
+    raw = field_value(read_text(path), "人格资产版本")
+    return int(raw) if raw.isdigit() else 1
+
+
+def expression_profile(root: Path) -> dict[str, object]:
+    path = root / "references" / "11-心理机制与表达策略.md"
+    profiles: list[str] = []
+    if path.is_file():
+        profiles = [field_value(block, "篇幅档").lower() for _, block in iter_blocks(read_text(path), EXPR_HEADING_RE)]
+    return {
+        "verbosity_profiles": sorted(set(profile for profile in profiles if profile)),
+        "allows_extended_prose": any(profile in {"extended", "rambling-characteristic"} for profile in profiles),
+        "allows_characteristic_repetition": any(profile == "rambling-characteristic" for profile in profiles),
+    }
+
+
+def source_card_texts(root: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    references = root / "references"
+    if not references.is_dir():
+        return result
+    for path in references.rglob("*对白库*.md"):
+        if not path.is_file() or "索引" in path.name:
+            continue
+        for card_id, block in iter_blocks(read_text(path), CARD_HEADING_RE):
+            result[card_id] = field_value(block, "原文")
+    return result
+
+
+def source_card_metadata(root: Path) -> dict[str, dict[str, str]]:
+    """Return auditable card fields used by the v2 trace contract."""
+    result: dict[str, dict[str, str]] = {}
+    references = root / "references"
+    if not references.is_dir():
+        return result
+    for path in references.rglob("*对白库*.md"):
+        if not path.is_file() or "索引" in path.name:
+            continue
+        for card_id, block in iter_blocks(read_text(path), CARD_HEADING_RE):
+            result[card_id] = {
+                "text": field_value(block, "原文"),
+                "quote_use": field_value(block, "引用方式").lower(),
+                "version_layer": field_value(block, "版本层").lower(),
+            }
+    return result
+
+
+def rule_and_background_ids(root: Path) -> tuple[set[str], set[str]]:
+    """Load known local rule/BIO identifiers for traceability validation."""
+    known_rules: set[str] = set()
+    references = root / "references"
+    for path in references.glob("*.md") if references.is_dir() else []:
+        text = read_text(path)
+        known_rules.update(rule_id for rule_id, _ in iter_blocks(text, EXPR_HEADING_RE))
+        known_rules.update(rule_id for rule_id, _ in iter_blocks(text, ANTI_HEADING_RE))
+        # CORE/VOICE/MICRO/MODE/MIND share the same stable heading convention;
+        # keeping this local avoids importing the mother validator at runtime.
+        for prefix in ("CORE", "VOICE", "MICRO", "MODE", "MIND"):
+            known_rules.update(
+                match.group(1).upper()
+                for match in re.finditer(rf"^###\s+({prefix}-\d{{2}})\s+\|", text, re.MULTILINE | re.IGNORECASE)
+            )
+    bio_path = references / "10-人物背景档案.md"
+    known_bio = {
+        bio_id for bio_id, _ in iter_blocks(read_text(bio_path), re.compile(r"^###\s+(BIO-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE))
+    } if bio_path.is_file() else set()
+    return known_rules, known_bio
+
+
 def visible_prose(text: str) -> str:
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     text = re.sub(r"`[^`\n]+`", " ", text)
@@ -116,9 +198,10 @@ def unique_pattern_hits(text: str, patterns: Sequence[str]) -> list[str]:
     return [matched for _, _, matched in chosen]
 
 
-def analyze(text: str, root: Path) -> dict[str, object]:
+def analyze(text: str, root: Path, trace: dict[str, object] | None = None) -> dict[str, object]:
     prose = visible_prose(text)
     findings: list[dict[str, object]] = []
+    profile = expression_profile(root)
 
     opening = next((item for item in GENERIC_OPENINGS if prose.startswith(item)), "")
     if opening:
@@ -145,10 +228,13 @@ def analyze(text: str, root: Path) -> dict[str, object]:
         add_finding(findings, "ai_written_connectors", min(30, 12 * len(ai_hits)), " / ".join(ai_hits))
 
     consulting_hits = unique_pattern_hits(prose, GENERIC_CONSULTING_PATTERNS)
-    if len(consulting_hits) >= 2 or (consulting_hits and WORKFLOW_FRAME_RE.search(prose)):
+    profiled_expression = bool((trace or {}).get("expression_rule_ids"))
+    if len(consulting_hits) >= 2 or (
+        consulting_hits and WORKFLOW_FRAME_RE.search(prose) and not profiled_expression
+    ):
         add_finding(findings, "generic_consulting_frame", 45, " / ".join(consulting_hits))
     elif consulting_hits:
-        add_finding(findings, "generic_consulting_tendency", 14, consulting_hits[0])
+        add_finding(findings, "generic_consulting_tendency", 8 if profiled_expression else 14, consulting_hits[0])
 
     sequence_hits = unique_literal_hits(prose, SEQUENCE_MARKERS)
     if len(sequence_hits) >= 3:
@@ -172,8 +258,71 @@ def analyze(text: str, root: Path) -> dict[str, object]:
     average_length = round(sum(lengths) / len(lengths), 1) if lengths else 0.0
     oral_hits = [item for item in ORAL_MARKERS if item in prose]
     short_sentences = sum(length <= 10 for length in lengths)
-    if len(lengths) >= 3 and average_length >= 30 and not oral_hits and short_sentences == 0:
+    desired_length = str((trace or {}).get("desired_length", "auto")).lower()
+    long_form_allowed = bool(profile["allows_extended_prose"]) and desired_length not in {"brief"}
+    if len(lengths) >= 3 and average_length >= 30 and not oral_hits and short_sentences == 0 and not long_form_allowed:
         add_finding(findings, "uniform_written_sentences", 20, f"平均句长 {average_length}，没有可见口语断点")
+
+    trace_findings: list[dict[str, object]] = []
+    # A single response is still useful when the caller only wants the
+    # profile-aware AI-tone check.  The trace contract belongs to generated
+    # batches (or to an explicit trace supplied by a caller), not to every
+    # ad-hoc ``--text`` invocation.  This keeps the checker compatible with
+    # old runtime hooks while preserving strict validation whenever a trace
+    # was actually requested.
+    trace_contract_requested = trace is not None
+    if asset_version(root) >= 2 and trace_contract_requested:
+        trace = trace or {}
+        presence = trace.get("character_presence")
+        if isinstance(presence, str):
+            presence_values = [presence] if presence.strip() else []
+        elif isinstance(presence, list):
+            presence_values = [str(item) for item in presence if str(item).strip()]
+        else:
+            presence_values = []
+        mind_ids = [str(item) for item in trace.get("mind_rule_ids", [])] if isinstance(trace.get("mind_rule_ids"), list) else []
+        expression_ids = [str(item) for item in trace.get("expression_rule_ids", [])] if isinstance(trace.get("expression_rule_ids"), list) else []
+        known_rules, known_bio = rule_and_background_ids(root)
+        # During an incomplete v2 build the strategy file may not exist yet;
+        # the mother Skill will stop the build at validation, but the checker
+        # remains usable for the draft's first pass.  Once the strategy file
+        # exists, every traced MIND/EXPR ID must be real.
+        strategy_path = root / "references" / "11-心理机制与表达策略.md"
+        strategy_text = read_text(strategy_path) if strategy_path.is_file() else ""
+        strategy_ready = bool(strategy_text.strip()) and not re.search(r"\[待填写|\{\{[A-Z0-9_]+\}\}|\b(?:TODO|TBD)\b", strategy_text, re.IGNORECASE)
+        if strategy_ready:
+            unknown_rules = sorted(
+                item.upper() for item in (*mind_ids, *expression_ids)
+                if item.upper() not in known_rules
+            )
+            if unknown_rules:
+                trace_findings.append({"code": "trace_rule_id_unknown", "detail": "未知规则编号：" + " / ".join(unknown_rules)})
+        trace_background_ids = trace.get("background_ids", [])
+        if isinstance(trace_background_ids, list):
+            unknown_bio = sorted(item.upper() for item in map(str, trace_background_ids) if item.upper() not in known_bio)
+            if unknown_bio:
+                trace_findings.append({"code": "trace_background_id_unknown", "detail": "未知背景编号：" + " / ".join(unknown_bio)})
+        if not presence_values or not (mind_ids or expression_ids):
+            trace_findings.append({"code": "character_presence_missing", "detail": "缺少人物判断、情绪或关系动作及其 MIND/EXPR 追溯"})
+        exact_quotes = trace.get("exact_quotes", [])
+        if exact_quotes and not isinstance(exact_quotes, list):
+            trace_findings.append({"code": "exact_quote_trace_invalid", "detail": "exact_quotes 必须是数组"})
+        elif isinstance(exact_quotes, list):
+            card_texts = source_card_texts(root)
+            card_metadata = source_card_metadata(root)
+            for quote in exact_quotes:
+                if not isinstance(quote, dict):
+                    trace_findings.append({"code": "exact_quote_trace_invalid", "detail": "精确引文轨迹不是对象"})
+                    continue
+                quote_text = str(quote.get("text", ""))
+                card_id = str(quote.get("card_id", "")).upper()
+                metadata = card_metadata.get(card_id, {})
+                if metadata and metadata.get("quote_use") not in {"exact-quote", ""}:
+                    trace_findings.append({"code": "exact_quote_policy_mismatch", "detail": f"{card_id or 'unknown'} 的卡片不是 exact-quote 使用方式"})
+                if not quote_text or quote_text not in prose or card_texts.get(card_id) != quote_text:
+                    trace_findings.append({"code": "exact_quote_unverified", "detail": f"{card_id or 'unknown'} 的精确引文未逐字对应原文卡"})
+        if trace_findings:
+            add_finding(findings, "trace_contract_failed", 60, " / ".join(str(item["code"]) for item in trace_findings))
 
     anti_path = root / "references" / "09-反角色对照.md"
     anti_hits: list[dict[str, object]] = []
@@ -208,12 +357,25 @@ def analyze(text: str, root: Path) -> dict[str, object]:
         "oral_markers": oral_hits,
         "findings": findings,
         "anti_rule_hits": anti_hits,
-        "note": "分数检测通用/书面腔与伪人类化风险；自然口语、临场画面和主动表达是否属于角色仍需原文证据、冷却记录和去名盲测。",
+        "profile": profile,
+        "trace_findings": trace_findings,
+        "note": "分数同时检查通用腔与人物存在轨迹；长句、古文或角色式重复只在 EXPR 篇幅档支持时放行。",
     }
 
 
-def analyze_batch(texts: Sequence[str], root: Path) -> dict[str, object]:
-    results = [analyze(text, root) for text in texts]
+def analyze_batch(entries: Sequence[object], root: Path) -> dict[str, object]:
+    normalized_entries: list[dict[str, object]] = []
+    for entry in entries:
+        if isinstance(entry, str):
+            normalized_entries.append({"response": entry, "generation_trace": {}})
+        elif isinstance(entry, dict):
+            normalized_entries.append({
+                "response": str(entry.get("response") or entry.get("text") or ""),
+                "generation_trace": entry.get("generation_trace") if isinstance(entry.get("generation_trace"), dict) else {},
+            })
+    texts = [str(entry["response"]) for entry in normalized_entries if str(entry["response"]).strip()]
+    traces = [entry["generation_trace"] for entry in normalized_entries if str(entry["response"]).strip()]
+    results = [analyze(text, root, trace if isinstance(trace, dict) else {}) for text, trace in zip(texts, traces)]
     prose_items = [visible_prose(text) for text in texts]
     workflow_indices = [index for index, prose in enumerate(prose_items) if WORKFLOW_FRAME_RE.search(prose)]
     we_indices = [index for index, prose in enumerate(prose_items) if "我们" in prose]
@@ -223,7 +385,10 @@ def analyze_batch(texts: Sequence[str], root: Path) -> dict[str, object]:
     sentence_counts = [len(sentence_lengths(prose)) for prose in prose_items if prose]
     question_end_indices = [index for index, prose in enumerate(prose_items) if QUESTION_END_RE.search(prose)]
 
-    def response_shape(prose: str) -> str:
+    def response_shape(prose: str, trace: dict[str, object]) -> str:
+        traced = str(trace.get("response_shape", "")).strip().lower()
+        if traced:
+            return traced
         if WORKFLOW_FRAME_RE.search(prose):
             return "workflow"
         if re.match(r"^(?:不行|不对|等等|等一下|先停|别动|不能)", prose):
@@ -236,7 +401,7 @@ def analyze_batch(texts: Sequence[str], root: Path) -> dict[str, object]:
             return "summary-close"
         return "other"
 
-    shapes = [response_shape(prose) for prose in prose_items if prose]
+    shapes = [response_shape(prose, trace if isinstance(trace, dict) else {}) for prose, trace in zip(prose_items, traces) if prose]
     shape_counts = Counter(shapes)
     repeated_shapes = {
         shape: count for shape, count in shape_counts.items()
@@ -244,6 +409,7 @@ def analyze_batch(texts: Sequence[str], root: Path) -> dict[str, object]:
     }
     findings: list[dict[str, object]] = []
     required_repetition = max(3, (len(texts) + 1) // 2)
+    repeated_workflow_count = len(workflow_indices) if len(workflow_indices) >= required_repetition else 0
     if len(workflow_indices) >= required_repetition:
         add_finding(
             findings, "batch_workflow_skeleton_repeated", 55,
@@ -287,6 +453,46 @@ def analyze_batch(texts: Sequence[str], root: Path) -> dict[str, object]:
             60,
             f"{non_pass}/{len(texts)} 条单条检查未通过；正式批量验收不允许隐藏 review 或 fail 样本",
         )
+    v2 = asset_version(root) >= 2
+    valid_traces = [trace for trace in traces if isinstance(trace, dict)]
+    presence_count = sum(bool(trace.get("character_presence")) and bool(trace.get("mind_rule_ids") or trace.get("expression_rule_ids")) for trace in valid_traces)
+    emotional_count = sum(trace.get("emotional_response") is True for trace in valid_traces)
+    proactive_count = sum(trace.get("proactive_expression") is True for trace in valid_traces)
+    traceable_count = sum(bool(trace.get("mind_rule_ids") or trace.get("expression_rule_ids")) for trace in valid_traces)
+    background_ids = [
+        str(background_id)
+        for trace in valid_traces
+        for background_id in (trace.get("background_ids") if isinstance(trace.get("background_ids"), list) else [])
+    ]
+    repeated_background_ids = {key: value for key, value in Counter(background_ids).items() if value > 3}
+    length_adapted = 0
+    for prose, trace in zip(prose_items, valid_traces):
+        desired = str(trace.get("desired_length", "auto")).lower()
+        length = len(prose)
+        if desired == "brief":
+            length_adapted += int(length <= 120)
+        elif desired == "extended":
+            length_adapted += int(length >= 120)
+        else:
+            length_adapted += 1
+    sample_count = max(len(texts), 1)
+    presence_coverage = round(presence_count * 100 / sample_count)
+    emotional_coverage = round(emotional_count * 100 / sample_count)
+    proactive_coverage = round(proactive_count * 100 / sample_count)
+    traceability_coverage = round(traceable_count * 100 / sample_count)
+    length_coverage = round(length_adapted * 100 / sample_count)
+    if v2 and presence_coverage < 90:
+        add_finding(findings, "batch_character_presence_low", 60, f"人物存在覆盖 {presence_coverage}% 低于 90%")
+    if v2 and emotional_coverage < 60:
+        add_finding(findings, "batch_emotional_response_low", 45, f"情绪回应覆盖 {emotional_coverage}% 低于 60%")
+    if v2 and proactive_coverage < 40:
+        add_finding(findings, "batch_proactive_expression_low", 45, f"主动表达覆盖 {proactive_coverage}% 低于 40%")
+    if v2 and traceability_coverage < 90:
+        add_finding(findings, "batch_traceability_low", 60, f"人物轨迹追溯覆盖 {traceability_coverage}% 低于 90%")
+    if v2 and length_coverage < 90:
+        add_finding(findings, "batch_length_adaptation_low", 45, f"篇幅适配覆盖 {length_coverage}% 低于 90%")
+    if v2 and repeated_background_ids:
+        add_finding(findings, "batch_background_callback_repeated", 35, " / ".join(f"{key}×{value}" for key, value in sorted(repeated_background_ids.items())))
     score = min(100, sum(int(item["weight"]) for item in findings))
     status = "pass" if score < 40 else ("review" if score < 60 else "fail")
     return {
@@ -294,32 +500,44 @@ def analyze_batch(texts: Sequence[str], root: Path) -> dict[str, object]:
         "status": status,
         "ai_tone_score": score,
         "sample_count": len(texts),
-        "workflow_skeleton_count": len(workflow_indices),
+        "workflow_frame_count": len(workflow_indices),
+        "workflow_skeleton_count": repeated_workflow_count,
         "collective_assistant_voice_count": len(we_indices),
         "repeated_openings": repeated_openings,
         "repeated_shapes": repeated_shapes,
         "question_closure_count": len(question_end_indices),
         "response_length_range": [min(prose_lengths), max(prose_lengths)] if prose_lengths else [],
         "sentence_counts": sentence_counts,
+        "character_presence_coverage": presence_coverage,
+        "emotional_response_coverage": emotional_coverage,
+        "proactive_expression_coverage": proactive_coverage,
+        "traceability_coverage": traceability_coverage,
+        "length_adaptation_coverage": length_coverage,
+        "background_callback_count": len(background_ids),
+        "repeated_background_ids": repeated_background_ids,
+        "quotation_trace_count": sum(
+            len(trace.get("exact_quotes")) for trace in valid_traces if isinstance(trace.get("exact_quotes"), list)
+        ),
         "findings": findings,
         "responses": results,
         "note": "批量检查用于发现单条看似自然、合起来却反复使用同一开发助手骨架的退化。",
     }
 
 
-def read_batch(path: Path) -> list[str]:
+def read_batch(path: Path) -> list[object]:
     payload = json.loads(read_text(path))
     if not isinstance(payload, list):
         raise SystemExit("错误：批量文件必须是 JSON 数组")
-    result: list[str] = []
+    result: list[object] = []
     for item in payload:
         if isinstance(item, str):
             value = item
         elif isinstance(item, dict):
-            value = str(item.get("response") or item.get("text") or "")
+            value = item
         else:
             value = ""
-        if value.strip():
+        candidate = value if isinstance(value, str) else str(value.get("response") or value.get("text") or "")
+        if candidate.strip():
             result.append(value)
     if not result:
         raise SystemExit("错误：批量文件中没有可检查的回复")

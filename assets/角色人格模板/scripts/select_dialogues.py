@@ -15,7 +15,8 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 CARD_HEADING_RE = re.compile(
     r"^##\s+([A-Z0-9][A-Z0-9-]*-\d{4})\s*$", re.MULTILINE | re.IGNORECASE
 )
-RULE_HEADING_RE = re.compile(r"^###\s+((?:CORE|VOICE|MICRO|MODE|ANTI)-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+RULE_HEADING_RE = re.compile(r"^###\s+((?:CORE|VOICE|MICRO|MODE|ANTI|MIND|EXPR)-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+BIO_HEADING_RE = re.compile(r"^###\s+(BIO-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 SCENE_HEADING_RE = re.compile(r"^##\s+([a-z][a-z-]*)\s+\|", re.MULTILINE)
 TAG_RE = re.compile(r"\b([a-z_]+)\s*=\s*([^;；]+)", re.IGNORECASE)
 MAPPING_RE = re.compile(r"\b([A-Z0-9][A-Z0-9-]*-\d{4})\s*=>\s*([^;；]+)", re.IGNORECASE)
@@ -174,6 +175,13 @@ def iter_scene_blocks(text: str) -> Iterable[Tuple[str, str]]:
         yield match.group(1).lower(), text[match.end() : end].strip()
 
 
+def iter_bio_blocks(text: str) -> Iterable[Tuple[str, str]]:
+    matches = list(BIO_HEADING_RE.finditer(text))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        yield match.group(1).upper(), text[match.end() : end].strip()
+
+
 def load_cards(root: Path) -> List[Card]:
     references = root / "references"
     paths = sorted(
@@ -251,6 +259,9 @@ def effective_query(args: argparse.Namespace, route: WorkRoute) -> Dict[str, str
             result[key] = ""
     result["source_language"] = args.source_language
     result["micro_function"] = args.micro_function.strip().lower()
+    result["concept"] = args.concept.strip().lower()
+    result["desired_length"] = args.desired_length
+    result["expression_strength"] = args.expression_strength
     return result
 
 
@@ -411,6 +422,8 @@ def related_rules(
         "micro": (root / "references" / "02-语言声纹.md", "MICRO-"),
         "modes": (root / "references" / "03-情绪与关系.md", "MODE-"),
         "anti": (root / "references" / "09-反角色对照.md", "ANTI-"),
+        "mind": (root / "references" / "11-心理机制与表达策略.md", "MIND-"),
+        "expression": (root / "references" / "11-心理机制与表达策略.md", "EXPR-"),
     }
     result: Dict[str, List[Dict[str, object]]] = {key: [] for key in references}
     query_has_semantics = any(query.get(key) for key in WEIGHTS)
@@ -419,7 +432,7 @@ def related_rules(
             continue
         if key == "micro" and not query.get("micro_function"):
             continue
-        candidates: List[Tuple[int, str, str, List[str], Dict[str, str], int]] = []
+        candidates: List[Tuple[int, str, str, List[str], Dict[str, str], int, bool]] = []
         for rule_id, block in iter_rule_blocks(read_text(path)):
             if not rule_id.startswith(prefix):
                 continue
@@ -433,9 +446,27 @@ def related_rules(
             )
             conditions = parse_tag_value(field_value(block, "检索条件"))
             condition_matches = condition_match_count(conditions, query)
-            if matched_ids and (not query_has_semantics or condition_matches > 0):
+            concept = query.get("concept", "")
+            concept_fields = " ".join(
+                field_value(block, field).lower()
+                for field in ("触发", "适用触发", "比喻或意象来源", "经历回调", "主动表达习惯")
+            )
+            concept_match = bool(concept and any(token in concept_fields for token in split_values(concept)))
+            if key in {"mind", "expression"}:
+                eligible = bool(matched_ids or concept_match)
+            elif key == "micro" and query.get("micro_function"):
+                # A micro rule is itself the audited mapping from a surface
+                # function to its original evidence.  It may seed retrieval
+                # even when the old card tags did not contain "greeting" etc.
+                eligible = bool(mappings)
+            else:
+                eligible = bool(matched_ids and (not query_has_semantics or condition_matches > 0))
+            if eligible:
                 candidates.append(
-                    (len(matched_ids) * 5 + condition_matches, rule_id, block, matched_ids, mappings, condition_matches)
+                    (
+                        len(matched_ids) * 5 + condition_matches + (100 if concept_match else 0),
+                        rule_id, block, matched_ids, mappings, condition_matches, concept_match,
+                    )
                 )
         candidates.sort(key=lambda item: (-item[0], item[1]))
         result[key] = [
@@ -445,11 +476,231 @@ def related_rules(
                 "supporting_card_ids": sorted(mappings),
                 "evidence_mapping": {card_id: mappings[card_id] for card_id in matched_ids},
                 "condition_matches": condition_matches,
+                "concept_match": concept_match,
                 "content": block,
             }
-            for _, rule_id, block, matched_ids, mappings, condition_matches in candidates[:limit]
+            for _, rule_id, block, matched_ids, mappings, condition_matches, concept_match in candidates[:limit]
         ]
     return result
+
+
+def prioritize_rule_evidence(
+    cards: Sequence[Card], matches: Sequence[Match], rules: Dict[str, List[Dict[str, object]]], limit: int,
+) -> List[Match]:
+    """Put audited micro/concept evidence ahead of generic tag ties.
+
+    v1 card tags often describe broad source-scene acts.  MIND/EXPR and MICRO
+    rules are narrower, evidence-mapped v2 assets, so a concept or exact
+    surface function should use their cards instead of padding with the first
+    alphabetic tag matches.
+    """
+    cards_by_id = {card.card_id: card for card in cards}
+    matches_by_id = {item.card.card_id: item for item in matches}
+    priority_ids: List[str] = []
+    for group in ("micro", "mind", "expression"):
+        for rule in rules.get(group, []):
+            if group != "micro" and rule.get("concept_match") is not True:
+                continue
+            for raw_id in rule.get("supporting_card_ids", []):
+                card_id = str(raw_id)
+                if card_id in cards_by_id and card_id not in priority_ids:
+                    priority_ids.append(card_id)
+
+    chosen: List[Match] = []
+    used_ids: Set[str] = set()
+    used_scenes: Set[str] = set()
+
+    def add(item: Match) -> None:
+        if item.card.card_id in used_ids or (item.card.scene_id and item.card.scene_id in used_scenes):
+            return
+        chosen.append(item)
+        used_ids.add(item.card.card_id)
+        if item.card.scene_id:
+            used_scenes.add(item.card.scene_id)
+
+    for card_id in priority_ids:
+        card = cards_by_id[card_id]
+        existing = matches_by_id.get(card_id)
+        evidence_level = (
+            "high"
+            if card.original_quality in VERIFIED_ORIGINAL_QUALITIES and card.scene_completeness in COMPLETE_SCENES
+            else "medium"
+        )
+        matched = tuple(dict.fromkeys((*((existing.matched if existing else ())), "rule_evidence")))
+        add(Match(card, max(existing.score if existing else 0, 7), matched, 2, evidence_level, ()))
+        if len(chosen) >= limit:
+            return chosen
+
+    for item in choose_matches(matches, limit, False):
+        add(item)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
+
+def background_callbacks(root: Path, concept: str, excluded: Set[str], limit: int = 2) -> List[Dict[str, object]]:
+    path = root / "references" / "10-人物背景档案.md"
+    if not path.is_file() or not concept.strip():
+        return []
+    tokens = split_values(concept)
+    candidates: List[Tuple[int, str, str]] = []
+    for bio_id, block in iter_bio_blocks(read_text(path)):
+        if bio_id in excluded:
+            continue
+        searchable = " ".join(
+            field_value(block, field).lower()
+            for field in ("主题", "适用问题", "联想触发", "可迁移意象", "情绪印记", "主观解释")
+        )
+        score = sum(3 if token in field_value(block, "联想触发").lower() else 1 for token in tokens if token and token in searchable)
+        if score:
+            candidates.append((score, bio_id, block))
+    candidates.sort(key=lambda item: (-item[0], item[1]))
+    return [
+        {
+            "bio_id": bio_id,
+            "subjective_interpretation": field_value(block, "主观解释"),
+            "emotional_imprint": field_value(block, "情绪印记"),
+            "callback_triggers": field_value(block, "联想触发"),
+            "portable_imagery": field_value(block, "可迁移意象"),
+            "willingness_to_talk": field_value(block, "愿谈程度"),
+            "source_ids": sorted(set(re.findall(r"\bSRC-\d{4}\b", field_value(block, "来源"), re.IGNORECASE))),
+        }
+        for _, bio_id, block in candidates[:limit]
+    ]
+
+
+def performance_guidance(
+    rules: Dict[str, List[Dict[str, object]]], callbacks: Sequence[Dict[str, object]],
+    desired_length: str, expression_strength: str, risk: str,
+) -> Dict[str, object]:
+    high_risk = risk.lower() in HIGH_RISKS
+    profile_values = [
+        field_value(str(rule["content"]), "篇幅档").strip().lower()
+        for rule in rules.get("expression", [])
+        if field_value(str(rule["content"]), "篇幅档").strip()
+    ]
+    # ``auto`` is a request to use the character profile, not a fourth
+    # verbosity mode.  Keep the requested value in the payload for audit, and
+    # expose the resolved value for the generator.  A profile with explicit
+    # rambling evidence may expand naturally; otherwise normal is the safe
+    # centre and a fully brief profile stays brief.
+    if desired_length == "auto":
+        if profile_values and all(item == "brief" for item in profile_values):
+            effective_length = "brief"
+        elif "rambling-characteristic" in profile_values or "extended" in profile_values:
+            effective_length = "extended"
+        else:
+            effective_length = "normal"
+    else:
+        effective_length = desired_length
+    if high_risk:
+        # A caller may request a strong device, but safety and factual clarity
+        # always win in a high-risk route; the request remains visible above.
+        effective_strength = "light"
+    elif expression_strength == "auto":
+        if callbacks and profile_values:
+            effective_strength = "strong" if any(item in {"extended", "rambling-characteristic"} for item in profile_values) else "normal"
+        else:
+            effective_strength = "normal"
+    else:
+        effective_strength = expression_strength
+    mind = []
+    for rule in rules.get("mind", []):
+        block = str(rule["content"])
+        mind.append({
+            "rule_id": rule["rule_id"],
+            "stance": field_value(block, "第一判断"),
+            "emotion_or_defense": field_value(block, "担心或防御"),
+            "relationship_action": field_value(block, "对用户的真实意图"),
+            "visible_expression": field_value(block, "外在表达"),
+            "action_tendency": field_value(block, "行动倾向"),
+        })
+    return {
+        "character_presence_required": True,
+        "required_presence_options": ["judgment", "emotion", "relationship-action"],
+        "mind_cues": mind,
+        "background_callback_available": bool(callbacks),
+        "risk_mode": "protective-character" if high_risk else "character-adaptive",
+        "desired_length": desired_length,
+        "effective_desired_length": effective_length,
+        "expression_strength": expression_strength,
+        "effective_expression_strength": effective_strength,
+        "verbosity_profiles_seen": sorted(set(profile_values)),
+        "candidate_shapes_required": 2,
+        "private_reasoning_boundary": "不要向用户泄露完整触发—欲望—恐惧—潜台词链，只表演外在判断、情绪与关系动作",
+    }
+
+
+def expression_guidance(
+    rules: Dict[str, List[Dict[str, object]]], desired_length: str, expression_strength: str,
+    risk: str,
+) -> Dict[str, object]:
+    strategies = []
+    for rule in rules.get("expression", []):
+        block = str(rule["content"])
+        strategies.append({
+            "rule_id": rule["rule_id"],
+            "explanation_method": field_value(block, "解释手法"),
+            "analogy_domain": field_value(block, "比喻或意象来源"),
+            "experience_callback": field_value(block, "经历回调"),
+            "quotation_policy": field_value(block, "典故或名句政策"),
+            "humor": field_value(block, "幽默与讽刺"),
+            "profile_length": field_value(block, "篇幅档"),
+            "character_repetition": field_value(block, "绕话与重复"),
+            "proactive_habit": field_value(block, "主动表达习惯"),
+            "forbidden_when": field_value(block, "禁用条件"),
+        })
+    profile_values = [
+        field_value(str(rule["content"]), "篇幅档").strip().lower()
+        for rule in rules.get("expression", [])
+        if field_value(str(rule["content"]), "篇幅档").strip()
+    ]
+    if desired_length == "auto":
+        if profile_values and all(item == "brief" for item in profile_values):
+            effective_length = "brief"
+        elif "rambling-characteristic" in profile_values or "extended" in profile_values:
+            effective_length = "extended"
+        else:
+            effective_length = "normal"
+    else:
+        effective_length = desired_length
+    if risk.lower() in HIGH_RISKS:
+        effective_strength = "light"
+    elif expression_strength == "auto":
+        effective_strength = (
+            "strong" if any(item in {"extended", "rambling-characteristic"} for item in profile_values) else "normal"
+        )
+    else:
+        effective_strength = expression_strength
+    return {
+        "desired_length": desired_length,
+        "effective_desired_length": effective_length,
+        "expression_strength": expression_strength,
+        "effective_expression_strength": effective_strength,
+        "strategies": strategies,
+        "strong_device_required": False,
+        "principle": "人物判断持续在场；故事、比喻、典故、名句与故意啰嗦只在证据和触发支持时使用",
+    }
+
+
+def traceability_payload(
+    selected: Sequence[Match], rules: Dict[str, List[Dict[str, object]]], callbacks: Sequence[Dict[str, object]],
+) -> Dict[str, object]:
+    return {
+        "dialogue_ids": [item.card.card_id for item in selected],
+        "core_rule_ids": [str(item["rule_id"]) for item in rules.get("core", [])],
+        "mind_rule_ids": [str(item["rule_id"]) for item in rules.get("mind", [])],
+        "expression_rule_ids": [str(item["rule_id"]) for item in rules.get("expression", [])],
+        "background_ids": [str(item["bio_id"]) for item in callbacks],
+        "source_ids": sorted({
+            source_id
+            for source_ids in (
+                *(re.findall(r"\bSRC-\d{4}\b", field_value(item.card.block, "来源位置"), re.IGNORECASE) for item in selected),
+                *(callback.get("source_ids", []) for callback in callbacks),
+            )
+            for source_id in source_ids
+        }),
+    }
 
 
 def composition_guidance(
@@ -531,6 +782,8 @@ def composition_guidance(
         "micro_interaction": bool(rules.get("micro")) if micro_required else True,
         "voice_structure": bool(rules.get("voice")),
         "stance_or_relation": bool(rules.get("core") or rules.get("modes")),
+        "character_mind": bool(rules.get("mind")) if query.get("concept") else True,
+        "expression_strategy": bool(rules.get("expression")) if query.get("concept") else True,
         "anti_pattern_check": bool(rules.get("anti")),
         "cross_unit_style_support": len(style_exemplars) >= 2,
     }
@@ -571,8 +824,8 @@ def delivery_guidance(
         presence_status = "serious-only"
         initiative_status = "protective-only"
     else:
-        presence_status = "due" if turns_since_presence >= 3 else ("hold" if turns_since_presence >= 0 else "optional")
-        initiative_status = "due" if turns_since_initiative >= 4 else ("hold" if turns_since_initiative >= 0 else "optional")
+        presence_status = "required"
+        initiative_status = "character-adaptive"
     anchors = []
     for item in selected:
         if item.card.visual_anchor and not context_is_missing(item.card.visual_anchor):
@@ -592,7 +845,9 @@ def delivery_guidance(
     return {
         "presence_status": presence_status,
         "initiative_status": initiative_status,
-        "max_presence_beats": 1,
+        "character_presence_required": True,
+        "max_theatrical_beats": 1,
+        "legacy_cooldown_arguments_ignored": True,
         "source_anchors": anchors[:2],
         "mode_cues": mode_cues,
         "work_scene": route.scene_id,
@@ -616,7 +871,8 @@ def delivery_guidance(
             "回答必须组合即时反应、声纹结构、角色立场或关系模式及反角色检查，不能用一张卡给通用助手骨架背书",
             "直接给用户需要的内容，并在同一条消息中自然表现角色",
             "画面只来自当前可见工作对象、已发生事件或原作证据，不虚构现实动作与感官",
-            "一次最多一个临场动作或主动表达；连续几轮不要重复",
+            "人物判断、情绪和关系动作可以持续出现；强故事、比喻和主动表达按角色资料与场景触发",
+            "一次最多一个舞台化临场动作；不得虚构现实感官、星号动作或无关小剧场",
             "短应声、停顿词和语气词只能沿用角色证据，不能为了像人而堆叠",
             "不要把每轮都收束成问题、下一步或行动号召；信息已足够时允许自然停住",
             "连续几轮不得使用相同句数、相同开场和相同反应—解释—推进形状",
@@ -714,7 +970,7 @@ def markdown_output(
                     f"- 节奏观察：{exemplar.get('rhythm_observation') or '无'}",
                 ]
             )
-    for label, key in (("角色核心规则", "core"), ("声纹规律", "voice"), ("微互动规则", "micro"), ("情绪关系模式", "modes"), ("反角色规则", "anti")):
+    for label, key in (("角色核心规则", "core"), ("心理机制", "mind"), ("表达策略", "expression"), ("声纹规律", "voice"), ("微互动规则", "micro"), ("情绪关系模式", "modes"), ("反角色规则", "anti")):
         if not rules[key]:
             continue
         lines.extend(["", f"# 命中的{label}"])
@@ -726,7 +982,8 @@ def markdown_output(
 def json_output(
     matches: Sequence[Match], card_count: int, rules: Dict[str, List[Dict[str, object]]],
     retrieval: Dict[str, object], route: WorkRoute, delivery: Dict[str, object],
-    composition: Dict[str, object], query: Dict[str, str],
+    composition: Dict[str, object], query: Dict[str, str], callbacks: Sequence[Dict[str, object]],
+    performance: Dict[str, object], expression: Dict[str, object], traceability: Dict[str, object],
 ) -> str:
     payload = {
         "library_cards": card_count,
@@ -734,6 +991,10 @@ def json_output(
         "retrieval": retrieval,
         "composition_guidance": composition,
         "delivery_guidance": delivery,
+        "performance_guidance": performance,
+        "background_callbacks": list(callbacks),
+        "expression_guidance": expression,
+        "traceability": traceability,
         "selected": [
             {
                 "card_id": item.card.card_id,
@@ -781,6 +1042,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--relation", default="")
     parser.add_argument("--risk", default="")
     parser.add_argument("--language", default="", help="输出语言；不用于过滤原语言语料")
+    parser.add_argument("--concept", default="", help="当前工作概念，如负担、等待、风险、返工、信任")
+    parser.add_argument("--desired-length", choices=("auto", "brief", "normal", "extended"), default="auto")
+    parser.add_argument("--expression-strength", choices=("auto", "light", "normal", "strong"), default="auto")
     parser.add_argument("--source-language", default="", help="仅在需要时限制原文语言")
     parser.add_argument(
         "--micro-function", default="",
@@ -794,6 +1058,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--turns-since-initiative", type=int, default=-1, help="距上次主动表达的轮数；未知为 -1")
     parser.add_argument("--last-user-focus", default="", help="用户上一句话中本轮需要直接接住的具体词或短语")
     parser.add_argument("--open-thread", default="", help="前文尚未收束、需要自然延续的话题；没有则留空")
+    parser.add_argument("--recent-background-id", action="append", default=[], help="近期已调用的 BIO-编号；可重复，避免同一故事反复出现")
     parser.add_argument(
         "--previous-shape", default="",
         choices=("", "question", "directive", "reassurance", "summary", "celebration", "refusal", "explanation"),
@@ -826,14 +1091,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ]
     selected = choose_matches(matches, min(args.limit, len(matches)), args.allow_low_evidence)
     rules = related_rules(root, selected, query)
+    if args.micro_function or args.concept:
+        selected = prioritize_rule_evidence(cards, matches, rules, min(args.limit, len(cards)))
+        rules = related_rules(root, selected, query)
     retrieval = retrieval_diagnostics(selected, matches, query)
     composition = composition_guidance(cards, selected, rules, query)
+    callbacks = background_callbacks(root, args.concept, parse_excludes(args.recent_background_id))
+    performance = performance_guidance(
+        rules, callbacks, args.desired_length, args.expression_strength, args.risk,
+    )
+    expression = expression_guidance(rules, args.desired_length, args.expression_strength, args.risk)
+    traceability = traceability_payload(selected, rules, callbacks)
     delivery = delivery_guidance(
         selected, rules, route, args.risk, args.turns_since_presence, args.turns_since_initiative,
         args.last_user_focus, args.open_thread, args.previous_shape,
     )
     if args.format == "json":
-        print(json_output(selected, len(cards), rules, retrieval, route, delivery, composition, query), end="")
+        print(json_output(
+            selected, len(cards), rules, retrieval, route, delivery, composition, query,
+            callbacks, performance, expression, traceability,
+        ), end="")
     elif args.format == "ids":
         print("\n".join(item.card.card_id for item in selected))
     else:

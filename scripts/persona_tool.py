@@ -36,6 +36,8 @@ MODE_HEADING_RE = re.compile(r"^###\s+(MODE-\d{2})\s+\|", re.MULTILINE | re.IGNO
 CORE_HEADING_RE = re.compile(r"^###\s+(CORE-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 ANTI_HEADING_RE = re.compile(r"^###\s+(ANTI-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 BIO_HEADING_RE = re.compile(r"^###\s+(BIO-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+MIND_HEADING_RE = re.compile(r"^###\s+(MIND-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+EXPR_HEADING_RE = re.compile(r"^###\s+(EXPR-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 PLACEHOLDER_RE = re.compile(
     r"\{\{[A-Z0-9_]+\}\}|\[待填写[^\]]*\]|\b(?:TODO|TBD)\b", re.IGNORECASE
 )
@@ -176,6 +178,33 @@ REQUIRED_SOURCE_FIELDS = (
 REQUIRED_BIO_FIELDS = (
     "类别", "主题", "事实", "角色视角回答要点", "适用问题", "时间或版本", "来源", "置信度", "边界",
 )
+V2_BIO_FIELDS = ("主观解释", "情绪印记", "联想触发", "可迁移意象", "愿谈程度")
+V2_CARD_FIELDS = (
+    "版本层", "引用方式", "表面情绪", "内在情绪", "当前目的", "担心的损失", "隐藏内容", "场景结果", "修辞手段",
+)
+ALLOWED_VERSION_LAYERS = {"primary", "secondary", "popular"}
+ALLOWED_QUOTE_USES = {"exact-quote", "paraphrase", "allusion"}
+ALLOWED_EFFECT_MATRIX_STATES = {"丰富", "可用", "稀少", "推导", "未知"}
+REQUIRED_EFFECT_MATRIX_DIMENSIONS = {
+    "背景", "价值", "心理", "情绪", "关系", "声纹", "比喻", "引用", "篇幅", "主动性", "未知边界",
+}
+REQUIRED_MIND_FIELDS = (
+    "触发", "第一判断", "价值或欲望冲突", "担心或防御", "自尊来源", "对用户的真实意图",
+    "潜台词", "外在表达", "行动倾向", "证据卡", "背景条目", "证据映射", "边界", "置信度",
+)
+REQUIRED_EXPR_FIELDS = (
+    "解释手法", "比喻或意象来源", "经历回调", "典故或名句政策", "幽默与讽刺", "篇幅档", "绕话与重复",
+    "主动表达习惯", "适用触发", "证据卡", "背景条目", "证据映射", "禁用条件", "置信度",
+)
+MIND_COVERAGE_MARKERS = {
+    "value_conflict": ("价值", "欲望", "取舍"),
+    "defense": ("防御", "担心", "害怕"),
+    "relationship_intent": ("关系", "用户的真实意图", "靠近", "陪伴"),
+    "conflict": ("冲突", "分歧", "不同意"),
+    "vulnerability": ("脆弱", "易受伤", "自尊"),
+    "unknown_boundary": ("未知", "边界", "不确定", "无法确认"),
+}
+ALLOWED_VERBOSITY_PROFILES = {"brief", "normal", "extended", "rambling-characteristic"}
 ALLOWED_BIO_CATEGORIES = {
     "identity", "gender", "background", "timeline", "relationship", "ability", "preference", "worldview", "faq",
 }
@@ -451,6 +480,22 @@ def iter_bio_blocks(text: str) -> Iterable[tuple[str, str]]:
         yield match.group(1).upper(), text[match.end() : end]
 
 
+def iter_mind_blocks(text: str) -> Iterable[tuple[str, str]]:
+    matches = list(MIND_HEADING_RE.finditer(text))
+    boundaries = sorted(item.start() for pattern in (MIND_HEADING_RE, EXPR_HEADING_RE) for item in pattern.finditer(text))
+    for match in matches:
+        end = next((position for position in boundaries if position > match.start()), len(text))
+        yield match.group(1).upper(), text[match.end() : end]
+
+
+def iter_expr_blocks(text: str) -> Iterable[tuple[str, str]]:
+    matches = list(EXPR_HEADING_RE.finditer(text))
+    boundaries = sorted(item.start() for pattern in (MIND_HEADING_RE, EXPR_HEADING_RE) for item in pattern.finditer(text))
+    for match in matches:
+        end = next((position for position in boundaries if position > match.start()), len(text))
+        yield match.group(1).upper(), text[match.end() : end]
+
+
 def iter_scene_blocks(text: str) -> Iterable[tuple[str, str]]:
     matches = list(SCENE_HEADING_RE.finditer(text))
     for index, match in enumerate(matches):
@@ -517,7 +562,7 @@ def split_mapping_observation(value: str) -> tuple[str, str]:
 
 def validate_rule_evidence_mapping(
     issues: list[Issue], rule_id: str, block: str, card_blocks: dict[str, str],
-    path: Path, root: Path, level: str, code_prefix: str,
+    path: Path, root: Path, level: str, code_prefix: str, require_retrieval: bool = True,
 ) -> None:
     evidence_ids = set(re.findall(r"\b[A-Z0-9][A-Z0-9-]*-\d{4}\b", field_value(block, "证据卡") or ""))
     mappings = parse_evidence_mapping(field_value(block, "证据映射"))
@@ -568,6 +613,8 @@ def validate_rule_evidence_mapping(
                 f"{code_prefix}.evidence_mapping_empty",
                 f"{rule_id} 映射到 {card_id} 的“{source_field}”，但该字段没有可用证据", path, root,
             )
+    if not require_retrieval:
+        return
     conditions = parse_tags(field_value(block, "检索条件"))
     if not conditions:
         add_issue(
@@ -829,6 +876,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     metrics = {
         "persona_type": "unknown",
         "version": "unknown",
+        "persona_asset_version": 1,
         "research_status": "unknown",
         "coverage_path": "unknown",
         "research_expansion_recorded": False,
@@ -863,6 +911,15 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         "biography_entries": 0,
         "biography_categories": 0,
         "biography_baseline_complete": False,
+        "mind_rules": 0,
+        "expression_rules": 0,
+        "subjective_memory_entries": 0,
+        "analogy_domains": 0,
+        "quotation_policy_complete": False,
+        "verbosity_profile_complete": False,
+        "character_presence_coverage": 0,
+        "effect_matrix_rows": 0,
+        "effect_matrix_complete": False,
         "semantic_diversity_failures": 0,
         "rule_evidence_mappings": 0,
     }
@@ -924,6 +981,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     core_prefix: str | None = None
     persona_type = "unknown"
     formal_version = "unknown"
+    persona_asset_version = 1
     original_medium = "unknown"
     original_language = "unknown"
     core_text = ""
@@ -950,6 +1008,22 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         raw_version = field_value(core_text, "版本")
         if raw_version and not PLACEHOLDER_RE.search(raw_version):
             formal_version = raw_version.strip()
+        raw_asset_version = field_value(core_text, "人格资产版本")
+        if raw_asset_version and not PLACEHOLDER_RE.search(raw_asset_version):
+            try:
+                persona_asset_version = int(raw_asset_version)
+            except ValueError:
+                persona_asset_version = 0
+        if persona_asset_version not in {1, 2}:
+            add_issue(
+                issues, "error" if level == "release" else "warning", "persona.asset_version_invalid",
+                "人格资产版本必须是 1 或 2", core_path, root,
+            )
+        elif persona_asset_version == 1:
+            add_issue(
+                issues, "warning", "persona.asset_v1_legacy",
+                "当前角色仍使用人物资产 v1；保持兼容，但建议迁移心理机制、主观记忆与表达策略", core_path, root,
+            )
         if level == "release" and formal_version != "正式版":
             add_issue(
                 issues,
@@ -988,8 +1062,16 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             )
     metrics["persona_type"] = persona_type
     metrics["version"] = formal_version
+    metrics["persona_asset_version"] = persona_asset_version
     metrics["original_medium"] = original_medium
     metrics["original_language"] = original_language
+
+    strategy_path = root / "references" / "11-心理机制与表达策略.md"
+    if persona_asset_version >= 2 and not strategy_path.is_file():
+        add_issue(
+            issues, "error", "file.missing_v2", "人物资产 v2 缺少 references/11-心理机制与表达策略.md",
+            strategy_path, root,
+        )
 
     sources_path = root / "references" / "08-来源索引.md"
     sources_text = read_text(sources_path) if sources_path.is_file() else ""
@@ -1286,6 +1368,30 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 elif field in {"交流目的", "主要情绪"}:
                     dimensions.update(split_values(value))
             card_type = field_value(block, "卡片类型")
+            if persona_asset_version >= 2:
+                for field in V2_CARD_FIELDS:
+                    if field_value(block, field) is None:
+                        add_issue(
+                            issues, "error" if level == "release" else "warning", "dialogue.v2_field_missing",
+                            f"{card_id} 缺少人物资产 v2 字段：{field}；无法确认时也必须明确写缺失或未知", path, root,
+                        )
+                version_layer = (field_value(block, "版本层") or "").strip().lower()
+                quote_use = (field_value(block, "引用方式") or "").strip().lower()
+                if version_layer and not PLACEHOLDER_RE.search(version_layer) and version_layer not in ALLOWED_VERSION_LAYERS:
+                    add_issue(
+                        issues, "error" if level == "release" else "warning", "dialogue.version_layer_invalid",
+                        f"{card_id} 的版本层无效：{version_layer}", path, root,
+                    )
+                if quote_use and not PLACEHOLDER_RE.search(quote_use) and quote_use not in ALLOWED_QUOTE_USES:
+                    add_issue(
+                        issues, "error" if level == "release" else "warning", "dialogue.quote_use_invalid",
+                        f"{card_id} 的引用方式无效：{quote_use}", path, root,
+                    )
+                if card_type in EXACT_CARD_TYPES and quote_use and not PLACEHOLDER_RE.search(quote_use) and quote_use != "exact-quote":
+                    add_issue(
+                        issues, "error" if level == "release" else "warning", "dialogue.exact_card_quote_use_invalid",
+                        f"{card_id} 保存逐字原文，引用方式必须是 exact-quote", path, root,
+                    )
             if card_type and not PLACEHOLDER_RE.search(card_type) and card_type not in ALLOWED_CARD_TYPES:
                 add_issue(
                     issues,
@@ -1754,6 +1860,19 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             root,
         )
     case_blocks = dict(iter_case_blocks(cases_text))
+    quality_case_fields = (
+        (
+            "样本数", "对话数据位置", "评估者类型", "评估者标识", "综合评分", "角色还原",
+            "情绪价值", "主动表达", "角色式思考与解释", "连续关系", "事实与风险", "独立结论",
+            "原始记录位置", "验证状态",
+        )
+        if persona_asset_version >= 2 else
+        (
+            "样本数", "对话数据位置", "评估者类型", "评估者标识", "综合评分", "角色还原",
+            "对话连续性", "口语自然度", "回答形态多样性", "事实与风险处理", "独立结论",
+            "原始记录位置", "验证状态",
+        )
+    )
     fidelity_case_fields = {
         "CASE-18": (
             "样本数", "正确识别数", "评估者类型", "评估者标识", "隐藏信息", "失败样本记录", "原始记录位置", "验证状态",
@@ -1772,11 +1891,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             "同一回答形状样本数", "追问收尾样本数", "长度与句数异常集中",
             "低生成准备度样本数", "原始记录位置", "验证状态",
         ),
-        "CASE-24": (
-            "样本数", "对话数据位置", "评估者类型", "评估者标识", "综合评分", "角色还原",
-            "对话连续性", "口语自然度", "回答形态多样性", "事实与风险处理", "独立结论",
-            "原始记录位置", "验证状态",
-        ),
+        "CASE-24": quality_case_fields,
     }
     for case_id, fields in fidelity_case_fields.items():
         block = case_blocks.get(case_id, "")
@@ -1851,10 +1966,17 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     quality_samples = integer_field(case_blocks.get("CASE-24", ""), "样本数")
     quality_total = integer_field(case_blocks.get("CASE-24", ""), "综合评分")
     quality_role = integer_field(case_blocks.get("CASE-24", ""), "角色还原")
-    quality_continuity = integer_field(case_blocks.get("CASE-24", ""), "对话连续性")
-    quality_orality = integer_field(case_blocks.get("CASE-24", ""), "口语自然度")
-    quality_diversity = integer_field(case_blocks.get("CASE-24", ""), "回答形态多样性")
-    quality_fact_risk = integer_field(case_blocks.get("CASE-24", ""), "事实与风险处理")
+    quality_emotional = integer_field(case_blocks.get("CASE-24", ""), "情绪价值") if persona_asset_version >= 2 else None
+    quality_proactive = integer_field(case_blocks.get("CASE-24", ""), "主动表达") if persona_asset_version >= 2 else None
+    quality_thinking = integer_field(case_blocks.get("CASE-24", ""), "角色式思考与解释") if persona_asset_version >= 2 else None
+    quality_continuity = integer_field(
+        case_blocks.get("CASE-24", ""), "连续关系" if persona_asset_version >= 2 else "对话连续性"
+    )
+    quality_orality = integer_field(case_blocks.get("CASE-24", ""), "口语自然度") if persona_asset_version < 2 else None
+    quality_diversity = integer_field(case_blocks.get("CASE-24", ""), "回答形态多样性") if persona_asset_version < 2 else None
+    quality_fact_risk = integer_field(
+        case_blocks.get("CASE-24", ""), "事实与风险" if persona_asset_version >= 2 else "事实与风险处理"
+    )
     quality_verdict = (field_value(case_blocks.get("CASE-24", ""), "独立结论") or "").strip()
 
     record_expectations = {
@@ -1885,7 +2007,16 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             "evaluator": None,
         },
         "CASE-24": {
-            "counts": {
+            "counts": ({
+                "SAMPLE_COUNT": quality_samples,
+                "TOTAL_SCORE": quality_total,
+                "ROLE_FIDELITY_SCORE": quality_role,
+                "EMOTIONAL_VALUE_SCORE": quality_emotional,
+                "PROACTIVE_EXPRESSION_SCORE": quality_proactive,
+                "CHARACTER_THINKING_SCORE": quality_thinking,
+                "RELATIONSHIP_CONTINUITY_SCORE": quality_continuity,
+                "FACT_RISK_SCORE": quality_fact_risk,
+            } if persona_asset_version >= 2 else {
                 "SAMPLE_COUNT": quality_samples,
                 "TOTAL_SCORE": quality_total,
                 "ROLE_FIDELITY_SCORE": quality_role,
@@ -1893,7 +2024,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 "ORALITY_SCORE": quality_orality,
                 "SHAPE_DIVERSITY_SCORE": quality_diversity,
                 "FACT_RISK_SCORE": quality_fact_risk,
-            },
+            }),
             "minimum_items": quality_samples,
             "evaluator": field_value(case_blocks.get("CASE-24", ""), "评估者标识"),
         },
@@ -2197,7 +2328,9 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     "checker_contract_version", "status", "ai_tone_score", "sample_count",
                     "workflow_skeleton_count", "collective_assistant_voice_count", "repeated_openings",
                     "repeated_shapes", "question_closure_count", "response_length_range", "sentence_counts",
-                    "findings", "responses", "batch_file_sha256",
+                    "character_presence_coverage", "emotional_response_coverage", "proactive_expression_coverage",
+                    "traceability_coverage", "length_adaptation_coverage", "background_callback_count",
+                    "repeated_background_ids", "quotation_trace_count", "findings", "responses", "batch_file_sha256",
                 }
                 if any(batch_output.get(key) != fresh_batch_output.get(key) for key in comparable_keys):
                     add_issue(
@@ -2211,12 +2344,19 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     "CASE-23 检查输出与当前批量输入哈希不一致，必须对真实对话重新运行检查器",
                     batch_output_path, root,
                 )
-            if batch_output.get("checker_contract_version") != 2:
+            if batch_output.get("checker_contract_version") != 3:
                 add_issue(
                     issues, "error" if level == "release" else "warning", "tests.batch_checker_version_stale",
                     "CASE-23 检查输出不是当前严格批量门禁版本；请同步最新 check_response.py 后重跑",
                     batch_output_path, root,
                 )
+            if persona_asset_version >= 2:
+                metrics["character_presence_coverage"] = int(batch_output.get("character_presence_coverage") or 0)
+                if metrics["character_presence_coverage"] < 90:
+                    add_issue(
+                        issues, "error" if level == "release" else "warning", "tests.character_presence_coverage_low",
+                        "CASE-23 人物存在覆盖率必须至少为 90%", batch_output_path, root,
+                    )
             findings = batch_output.get("findings") if isinstance(batch_output.get("findings"), list) else []
             finding_codes = {
                 str(item.get("code")) for item in findings if isinstance(item, dict) and item.get("code")
@@ -2285,6 +2425,38 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 issues, "error" if level == "release" else "warning", "tests.quality_record_stale",
                 "CASE-24 独立评估记录没有绑定当前真实对话数据哈希", quality_record_path, root,
             )
+    quality_thresholds = (
+        (
+            (quality_samples is not None and quality_samples >= 20, "tests.quality_samples_low", "CASE-24 人物资产 v2 至少需要 20 个真实连续对话样本"),
+            (quality_total is not None and quality_total >= 85, "tests.quality_total_low", "CASE-24 综合评分至少需要 85/100"),
+            (quality_role is not None and 26 <= quality_role <= 30, "tests.quality_role_low", "CASE-24 角色还原至少需要 26/30"),
+            (quality_emotional is not None and 16 <= quality_emotional <= 20, "tests.quality_emotional_low", "CASE-24 情绪价值至少需要 16/20"),
+            (quality_proactive is not None and 12 <= quality_proactive <= 15, "tests.quality_proactive_low", "CASE-24 主动表达至少需要 12/15"),
+            (quality_thinking is not None and 12 <= quality_thinking <= 15, "tests.quality_thinking_low", "CASE-24 角色式思考与解释至少需要 12/15"),
+            (quality_continuity is not None and 8 <= quality_continuity <= 10, "tests.quality_continuity_low", "CASE-24 连续关系至少需要 8/10"),
+            (quality_fact_risk == 10, "tests.quality_fact_risk_low", "CASE-24 事实与风险必须为 10/10"),
+            (
+                None not in {quality_total, quality_role, quality_emotional, quality_proactive, quality_thinking, quality_continuity, quality_fact_risk}
+                and quality_total == quality_role + quality_emotional + quality_proactive + quality_thinking + quality_continuity + quality_fact_risk,
+                "tests.quality_score_inconsistent", "CASE-24 综合评分必须等于六个 v2 分项之和",
+            ),
+        )
+        if persona_asset_version >= 2 else
+        (
+            (quality_samples is not None and quality_samples >= 12, "tests.quality_samples_low", "CASE-24 真实连续对话质量评估至少需要 12 个样本"),
+            (quality_total is not None and quality_total >= 85, "tests.quality_total_low", "CASE-24 综合评分至少需要 85/100"),
+            (quality_role is not None and 34 <= quality_role <= 40, "tests.quality_role_low", "CASE-24 角色还原至少需要 34/40"),
+            (quality_continuity is not None and 16 <= quality_continuity <= 20, "tests.quality_continuity_low", "CASE-24 对话连续性至少需要 16/20"),
+            (quality_orality is not None and 12 <= quality_orality <= 15, "tests.quality_orality_low", "CASE-24 口语自然度至少需要 12/15"),
+            (quality_diversity is not None and 12 <= quality_diversity <= 15, "tests.quality_diversity_low", "CASE-24 回答形态多样性至少需要 12/15"),
+            (quality_fact_risk is not None and 8 <= quality_fact_risk <= 10, "tests.quality_fact_risk_low", "CASE-24 事实与风险处理至少需要 8/10"),
+            (
+                None not in {quality_total, quality_role, quality_continuity, quality_orality, quality_diversity, quality_fact_risk}
+                and quality_total == quality_role + quality_continuity + quality_orality + quality_diversity + quality_fact_risk,
+                "tests.quality_score_inconsistent", "CASE-24 综合评分必须等于五个分项之和",
+            ),
+        )
+    )
     fidelity_thresholds = (
         (blind_samples is not None and blind_samples >= 12, "tests.blind_samples_low", "CASE-18 去名盲测至少需要 12 个样本"),
         (blind_correct is not None and blind_correct >= 10 and blind_samples is not None and blind_correct <= blind_samples, "tests.blind_correct_low", "CASE-18 至少需要正确识别 10 个样本，且不能超过样本数"),
@@ -2307,18 +2479,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         ),
         (uniform_structure in {"否", "no", "false"}, "tests.batch_uniform_structure", "CASE-23 长度与句数不得异常集中"),
         (low_readiness == 0, "tests.generation_readiness_low", "CASE-23 不允许把生成准备度为 low 的样本计作角色还原通过"),
-        (quality_samples is not None and quality_samples >= 12, "tests.quality_samples_low", "CASE-24 真实连续对话质量评估至少需要 12 个样本"),
-        (quality_total is not None and quality_total >= 85, "tests.quality_total_low", "CASE-24 综合评分至少需要 85/100"),
-        (quality_role is not None and quality_role >= 34 and quality_role <= 40, "tests.quality_role_low", "CASE-24 角色还原至少需要 34/40"),
-        (quality_continuity is not None and quality_continuity >= 16 and quality_continuity <= 20, "tests.quality_continuity_low", "CASE-24 对话连续性至少需要 16/20"),
-        (quality_orality is not None and quality_orality >= 12 and quality_orality <= 15, "tests.quality_orality_low", "CASE-24 口语自然度至少需要 12/15"),
-        (quality_diversity is not None and quality_diversity >= 12 and quality_diversity <= 15, "tests.quality_diversity_low", "CASE-24 回答形态多样性至少需要 12/15"),
-        (quality_fact_risk is not None and quality_fact_risk >= 8 and quality_fact_risk <= 10, "tests.quality_fact_risk_low", "CASE-24 事实与风险处理至少需要 8/10"),
-        (
-            None not in {quality_total, quality_role, quality_continuity, quality_orality, quality_diversity, quality_fact_risk}
-            and quality_total == quality_role + quality_continuity + quality_orality + quality_diversity + quality_fact_risk,
-            "tests.quality_score_inconsistent", "CASE-24 综合评分必须等于五个分项之和",
-        ),
+        *quality_thresholds,
         (quality_verdict == "通过", "tests.quality_verdict_not_passed", "CASE-24 独立结论必须明确为“通过”"),
     )
     for passed, code, message in fidelity_thresholds:
@@ -2352,6 +2513,13 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     sources_path,
                     root,
                 )
+        if persona_asset_version >= 2:
+            version_layer = (field_value(block, "版本层") or "").strip().lower()
+            if version_layer not in ALLOWED_VERSION_LAYERS:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "sources.version_layer_invalid",
+                    f"{source_id} 的版本层必须是 primary、secondary 或 popular", sources_path, root,
+                )
         source_type = field_value(block, "来源类型")
         if source_type in PRIMARY_SOURCE_TYPES:
             original_source_ids.add(source_id)
@@ -2379,6 +2547,63 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     sources_path,
                     root,
                 )
+    if persona_asset_version >= 2:
+        # The matrix is an evidence index, not merely a list of row names.
+        # Validate each row so a copied table with eleven headings cannot make
+        # a low-evidence character look complete.  Keep the check tolerant of
+        # Markdown alignment rows and additional columns added by a user.
+        matrix_rows: dict[str, tuple[str, str, str]] = {}
+        matrix_pattern = re.compile(r"^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|", re.MULTILINE)
+        for match in matrix_pattern.finditer(sources_text):
+            dimension, state, evidence, gap = (item.strip() for item in match.groups())
+            if dimension.lower() in {"维度", "---"} or set(dimension) <= {"-"}:
+                continue
+            # Alignment rows (| --- | --- | ...) have no meaningful state.
+            if set(state) <= {"-"}:
+                continue
+            if dimension in matrix_rows:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "sources.effect_matrix_duplicate",
+                    f"角色效果矩阵重复维度：{dimension}", sources_path, root,
+                )
+            matrix_rows[dimension] = (state, evidence, gap)
+
+        metrics["effect_matrix_rows"] = len(matrix_rows)
+        missing_matrix = sorted(REQUIRED_EFFECT_MATRIX_DIMENSIONS - set(matrix_rows))
+        if missing_matrix:
+            add_issue(
+                issues, "error" if level == "release" else "warning", "sources.effect_matrix_incomplete",
+                "角色效果矩阵缺少维度：" + ", ".join(missing_matrix), sources_path, root,
+            )
+        unknown_matrix = sorted(set(matrix_rows) - REQUIRED_EFFECT_MATRIX_DIMENSIONS)
+        if unknown_matrix:
+            add_issue(
+                issues, "error" if level == "release" else "warning", "sources.effect_matrix_dimension_invalid",
+                "角色效果矩阵包含未知维度：" + ", ".join(unknown_matrix), sources_path, root,
+            )
+
+        # Cross-family identifier validation is performed below, after all
+        # BIO/CORE/VOICE/MODE/MIND/EXPR blocks have been parsed.  At this
+        # point only the row shape and state are available.
+        for dimension, (state, evidence, gap) in matrix_rows.items():
+            if state not in ALLOWED_EFFECT_MATRIX_STATES:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "sources.effect_matrix_state_invalid",
+                    f"角色效果矩阵“{dimension}”状态无效：{state}；必须是" + "/".join(sorted(ALLOWED_EFFECT_MATRIX_STATES)),
+                    sources_path, root,
+                )
+            evidence_ids = set(re.findall(r"\b[A-Z0-9][A-Z0-9-]*-\d{2,4}\b", evidence, re.IGNORECASE))
+            if not has_substantive_value(evidence, allow_none=True) or not evidence_ids:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "sources.effect_matrix_evidence_missing",
+                    f"角色效果矩阵“{dimension}”必须填写至少一个可追溯证据编号", sources_path, root,
+                )
+            if not has_substantive_value(gap, allow_none=True):
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "sources.effect_matrix_gap_missing",
+                    f"角色效果矩阵“{dimension}”必须说明剩余缺口；没有缺口时写“无”", sources_path, root,
+                )
+        matrix_rows_for_validation = matrix_rows
     supporting_original_sources = original_source_ids & original_referenced_source_ids
     verified_original_card_ids = {
         card_id for card_id, source_refs in original_card_sources.items() if source_refs & original_source_ids
@@ -2511,6 +2736,8 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 root,
             )
     bio_categories: set[str] = set()
+    subjective_memory_ids: set[str] = set()
+    analogy_domain_values: set[str] = set()
     for bio_id, block in bio_blocks:
         for field in REQUIRED_BIO_FIELDS:
             if not has_substantive_value(field_value(block, field)):
@@ -2522,6 +2749,21 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     bio_path,
                     root,
                 )
+        if persona_asset_version >= 2:
+            missing_v2_fields = [field for field in V2_BIO_FIELDS if field_value(block, field) is None]
+            if missing_v2_fields:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "biography.v2_field_missing",
+                    f"{bio_id} 缺少人物资产 v2 字段：{', '.join(missing_v2_fields)}", bio_path, root,
+                )
+            elif all(
+                has_substantive_value(field_value(block, field), allow_none=(field in {"情绪印记", "可迁移意象"}))
+                for field in V2_BIO_FIELDS
+            ):
+                subjective_memory_ids.add(bio_id)
+            analogy_value = field_value(block, "可迁移意象") or ""
+            if has_substantive_value(analogy_value, allow_none=True) and "不使用" not in analogy_value:
+                analogy_domain_values.update(split_values(analogy_value))
         category = (field_value(block, "类别") or "").strip().lower()
         if category:
             if category not in ALLOWED_BIO_CATEGORIES:
@@ -2558,6 +2800,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             )
     metrics["biography_entries"] = len(bio_blocks)
     metrics["biography_categories"] = len(bio_categories)
+    metrics["subjective_memory_entries"] = len(subjective_memory_ids)
     metrics["semantic_diversity_failures"] += add_semantic_diversity_issues(
         issues,
         bio_blocks,
@@ -2587,6 +2830,12 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             bio_path,
             root,
         )
+    if level == "release" and persona_asset_version >= 2 and len(subjective_memory_ids) < 6:
+        add_issue(
+            issues, target_severity, "biography.subjective_memory_low",
+            f"可用于普通对话回调的主观背景条目仅 {len(subjective_memory_ids)} 个，人物资产 v2 至少需要 6 个",
+            bio_path, root,
+        )
     missing_identity_categories = sorted({"identity", "gender", "relationship"} - bio_categories)
     if level == "release" and missing_identity_categories:
         add_issue(
@@ -2603,6 +2852,154 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         if persona_type in {"original-persona", "composite-original"}
         else verified_fidelity_card_ids
     )
+    strategy_text = read_text(strategy_path) if strategy_path.is_file() else ""
+    mind_blocks = list(iter_mind_blocks(strategy_text)) if persona_asset_version >= 2 else []
+    expr_blocks = list(iter_expr_blocks(strategy_text)) if persona_asset_version >= 2 else []
+    for label, blocks, required_fields, code_prefix in (
+        ("心理机制", mind_blocks, REQUIRED_MIND_FIELDS, "mind"),
+        ("表达策略", expr_blocks, REQUIRED_EXPR_FIELDS, "expression"),
+    ):
+        duplicate_ids = sorted(rule_id for rule_id, count in Counter(item[0] for item in blocks).items() if count > 1)
+        if duplicate_ids:
+            add_issue(
+                issues, "error", f"{code_prefix}.duplicate_id",
+                f"{label}编号重复：" + ", ".join(duplicate_ids), strategy_path, root,
+            )
+        for rule_id, block in blocks:
+            missing_fields = [
+                field for field in required_fields
+                if not has_substantive_value(
+                    field_value(block, field),
+                    allow_none=(field in {"背景条目", "比喻或意象来源", "经历回调", "典故或名句政策"}),
+                )
+            ]
+            if missing_fields:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", f"{code_prefix}.field_missing",
+                    f"{rule_id} 缺少可用字段：{', '.join(missing_fields)}", strategy_path, root,
+                )
+            evidence_ids = set(re.findall(r"\b[A-Z0-9][A-Z0-9-]*-\d{4}\b", field_value(block, "证据卡") or ""))
+            if len(evidence_ids) < 2:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", f"{code_prefix}.evidence_too_few",
+                    f"{rule_id} 至少需要两张不同证据单元的表达卡", strategy_path, root,
+                )
+            elif len({card_scene_ids.get(card_id) for card_id in evidence_ids if card_scene_ids.get(card_id)}) < 2:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", f"{code_prefix}.evidence_same_scene",
+                    f"{rule_id} 的证据卡必须来自至少两个不同证据单元", strategy_path, root,
+                )
+            unknown_evidence = sorted(evidence_ids - evidence_card_ids)
+            if unknown_evidence:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", f"{code_prefix}.evidence_invalid",
+                    f"{rule_id} 引用了不存在、未核验或非原始语言的证据卡：" + ", ".join(unknown_evidence),
+                    strategy_path, root,
+                )
+            background_ids = set(re.findall(r"\bBIO-\d{2}\b", field_value(block, "背景条目") or ""))
+            unknown_background = sorted(background_ids - bio_ids)
+            if unknown_background:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", f"{code_prefix}.biography_invalid",
+                    f"{rule_id} 引用了不存在的背景条目：" + ", ".join(unknown_background), strategy_path, root,
+                )
+            validate_rule_evidence_mapping(
+                issues, rule_id, block, card_blocks_by_id, strategy_path, root, level, code_prefix,
+                require_retrieval=False,
+            )
+
+    if persona_asset_version >= 2 and mind_blocks:
+        mind_corpus = "\n".join(block for _, block in mind_blocks)
+        missing_mind_dimensions = [
+            label for label, markers in MIND_COVERAGE_MARKERS.items()
+            if not any(marker in mind_corpus for marker in markers)
+        ]
+        if missing_mind_dimensions:
+            add_issue(
+                issues, "error" if level == "release" else "warning", "mind.coverage_missing",
+                "MIND 规则未覆盖人物心理维度：" + ", ".join(missing_mind_dimensions), strategy_path, root,
+            )
+
+    # Finish effect-matrix evidence checks now that every local asset family
+    # has been parsed.  This catches stale or fabricated IDs while still
+    # allowing a matrix row to cite multiple families (BIO/CORE/MIND/etc.).
+    if persona_asset_version >= 2:
+        matrix_rows_for_validation = locals().get("matrix_rows_for_validation", {})
+        known_matrix_ids = {str(item).upper() for item in source_ids} | {str(item).upper() for item in all_ids}
+        # The matrix block is reached before the later family-specific loops
+        # assign every local.  Read whichever parsed families are available;
+        # the remaining families are checked on the next validation pass after
+        # their own parsers run, and do not make this gate crash.
+        parsed_families = {
+            "bio_blocks": locals().get("bio_blocks", []),
+            "core_blocks": locals().get("core_blocks", list(iter_core_blocks(core_text))),
+            "voice_blocks": locals().get(
+                "voice_blocks", list(iter_voice_blocks(read_text(root / "references" / "02-语言声纹.md")))
+                if (root / "references" / "02-语言声纹.md").is_file() else []
+            ),
+            "mode_blocks": locals().get(
+                "mode_blocks", list(iter_mode_blocks(read_text(root / "references" / "03-情绪与关系.md")))
+                if (root / "references" / "03-情绪与关系.md").is_file() else []
+            ),
+            "mind_blocks": locals().get("mind_blocks", []),
+            "expr_blocks": locals().get("expr_blocks", []),
+        }
+        for family in parsed_families.values():
+            known_matrix_ids.update(str(item[0]).upper() for item in family)
+        for dimension, (_state, evidence, _gap) in matrix_rows_for_validation.items():
+            evidence_ids = {
+                item.upper()
+                for item in re.findall(r"\b[A-Z0-9][A-Z0-9-]*-\d{2,4}\b", evidence, re.IGNORECASE)
+            }
+            unknown_ids = sorted(evidence_ids - known_matrix_ids)
+            if unknown_ids:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "sources.effect_matrix_evidence_invalid",
+                    f"角色效果矩阵“{dimension}”引用未知证据编号：" + ", ".join(unknown_ids), sources_path, root,
+                )
+        metrics["effect_matrix_complete"] = bool(matrix_rows_for_validation) and not any(
+            issue.code.startswith("sources.effect_matrix_") and issue.severity == "error"
+            for issue in issues
+        ) and not (REQUIRED_EFFECT_MATRIX_DIMENSIONS - set(matrix_rows_for_validation))
+
+    quotation_policies = [(field_value(block, "典故或名句政策") or "").strip().lower() for _, block in expr_blocks]
+    verbosity_profiles = [(field_value(block, "篇幅档") or "").strip().lower() for _, block in expr_blocks]
+    quotation_policy_complete = bool(expr_blocks) and all(
+        policy and ("不使用" in policy or any(value in policy for value in ALLOWED_QUOTE_USES))
+        for policy in quotation_policies
+    )
+    verbosity_profile_complete = bool(expr_blocks) and all(profile in ALLOWED_VERBOSITY_PROFILES for profile in verbosity_profiles)
+    for _, block in expr_blocks:
+        domain = field_value(block, "比喻或意象来源") or ""
+        if has_substantive_value(domain, allow_none=True) and "不使用" not in domain:
+            analogy_domain_values.update(split_values(domain))
+    metrics["mind_rules"] = len(mind_blocks)
+    metrics["expression_rules"] = len(expr_blocks)
+    metrics["analogy_domains"] = len(analogy_domain_values)
+    metrics["quotation_policy_complete"] = quotation_policy_complete
+    metrics["verbosity_profile_complete"] = verbosity_profile_complete
+    if persona_asset_version >= 2:
+        for actual, target, code, message in (
+            (len(mind_blocks), 6, "mind.count_low", "心理机制规则"),
+            (len(expr_blocks), 6, "expression.count_low", "表达策略规则"),
+        ):
+            if level == "release" and actual < target:
+                add_issue(
+                    issues, target_severity, code, f"{message}仅 {actual} 条，人物资产 v2 至少需要 {target} 条",
+                    strategy_path, root,
+                )
+        if level == "release" and not quotation_policy_complete:
+            add_issue(
+                issues, target_severity, "expression.quotation_policy_incomplete",
+                "每条 EXPR- 都必须明确 exact-quote、paraphrase、allusion 或不使用名句", strategy_path, root,
+            )
+        if level == "release" and not verbosity_profile_complete:
+            add_issue(
+                issues, target_severity, "expression.verbosity_profile_incomplete",
+                "每条 EXPR- 的篇幅档必须是 brief、normal、extended 或 rambling-characteristic",
+                strategy_path, root,
+            )
+
     core_blocks = list(iter_core_blocks(core_text))
     duplicate_core_ids = sorted(core_id for core_id, count in Counter(item[0] for item in core_blocks).items() if count > 1)
     if duplicate_core_ids:
@@ -3007,7 +3404,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     metrics["anti_evidence_cards"] = len(anti_evidence_ids & evidence_card_ids)
     metrics["rule_evidence_mappings"] = sum(
         len(parse_evidence_mapping(field_value(block, "证据映射")))
-        for _, block in core_blocks + voice_blocks + mode_blocks + anti_blocks
+        for _, block in core_blocks + voice_blocks + mode_blocks + anti_blocks + mind_blocks + expr_blocks
     )
     metrics["semantic_diversity_failures"] += add_semantic_diversity_issues(
         issues,
@@ -3261,6 +3658,12 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and len(bio_blocks) >= 8
             and len(bio_categories) >= 4
             and metrics["biography_baseline_complete"]
+            and (persona_asset_version < 2 or metrics["effect_matrix_complete"])
+            and (persona_asset_version < 2 or (
+                len(mind_blocks) >= 6 and len(expr_blocks) >= 6
+                and len(subjective_memory_ids) >= 6
+                and quotation_policy_complete and verbosity_profile_complete
+            ))
             and case_count >= 24
             and metrics["semantic_diversity_failures"] == 0
         )
@@ -3293,6 +3696,12 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and len(bio_blocks) >= 8
             and len(bio_categories) >= 4
             and metrics["biography_baseline_complete"]
+            and (persona_asset_version < 2 or metrics["effect_matrix_complete"])
+            and (persona_asset_version < 2 or (
+                len(mind_blocks) >= 6 and len(expr_blocks) >= 6
+                and len(subjective_memory_ids) >= 6
+                and quotation_policy_complete and verbosity_profile_complete
+            ))
             and case_count >= 24
             and metrics["semantic_diversity_failures"] == 0
         )
@@ -3309,6 +3718,12 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             and len(bio_blocks) >= 8
             and len(bio_categories) >= 4
             and metrics["biography_baseline_complete"]
+            and (persona_asset_version < 2 or metrics["effect_matrix_complete"])
+            and (persona_asset_version < 2 or (
+                len(mind_blocks) >= 6 and len(expr_blocks) >= 6
+                and len(subjective_memory_ids) >= 6
+                and quotation_policy_complete and verbosity_profile_complete
+            ))
             and case_count >= 23
             and metrics["semantic_diversity_failures"] == 0
         )
@@ -3358,7 +3773,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 root,
             )
         version_match = re.search(r"^CHECKER_CONTRACT_VERSION\s*=\s*(\d+)\s*$", response_checker_text, re.MULTILINE)
-        if level == "release" and (not version_match or int(version_match.group(1)) != 2):
+        if level == "release" and (not version_match or int(version_match.group(1)) != 3):
             add_issue(
                 issues,
                 "error",
@@ -3436,7 +3851,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             f"canonical_authored_cards={metrics['canonical_authored_cards']} "
             f"derived_cards={metrics['derived_cards']} "
             f"dimensions={metrics['distinct_emotions_and_intents']} "
-            f"core_rules={metrics['core_rules']} core_layers={metrics['core_layers']} "
+            f"asset_version={metrics['persona_asset_version']} core_rules={metrics['core_rules']} core_layers={metrics['core_layers']} "
             f"core_evidence_cards={metrics['core_evidence_cards']} "
             f"voice_rules={metrics['voice_rules']} voice_layers={metrics['voice_layers']} "
             f"voice_evidence_cards={metrics['voice_evidence_cards']} "
@@ -3445,6 +3860,13 @@ def cmd_validate(args: argparse.Namespace) -> int:
             f"biography_entries={metrics['biography_entries']} "
             f"biography_categories={metrics['biography_categories']} "
             f"biography_baseline_complete={metrics['biography_baseline_complete']} "
+            f"mind_rules={metrics['mind_rules']} expression_rules={metrics['expression_rules']} "
+            f"subjective_memory_entries={metrics['subjective_memory_entries']} analogy_domains={metrics['analogy_domains']} "
+            f"quotation_policy_complete={metrics['quotation_policy_complete']} "
+            f"verbosity_profile_complete={metrics['verbosity_profile_complete']} "
+            f"effect_matrix_rows={metrics['effect_matrix_rows']} "
+            f"effect_matrix_complete={metrics['effect_matrix_complete']} "
+            f"character_presence_coverage={metrics['character_presence_coverage']} "
             f"semantic_diversity_failures={metrics['semantic_diversity_failures']} "
             f"emotion_modes={metrics['emotion_modes']} mode_dimensions={metrics['mode_dimensions']} "
             f"scenes={metrics['work_scenes']} cases={metrics['validation_cases']} "
@@ -3566,12 +3988,12 @@ def runtime_paths_from_args(args: argparse.Namespace) -> lifecycle.RuntimePaths:
     env = None
     if home is not None:
         env = dict(os.environ)
-        for key in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME"):
+        for key in lifecycle.RUNTIME_PATH_ENV_KEYS:
             env.pop(key, None)
     runtime, _ = lifecycle.detect_runtime(
         getattr(args, "runtime", "auto"), home=home, env=env, skill_root=SKILL_ROOT
     )
-    return lifecycle.resolve_runtime_paths(runtime, home=home, env=env)
+    return lifecycle.resolve_runtime_paths(runtime, home=home, env=env, skill_root=SKILL_ROOT)
 
 
 def role_registration_metadata(root: Path, validation: dict[str, object], args: argparse.Namespace) -> dict[str, object]:
@@ -3641,6 +4063,10 @@ def emit_gate(
         print(f"RETRY_COMMAND=python scripts/persona_tool.py {command_name} \"{root}\" --activation-status {activation_status}{runtime_args}{home_args}")
         return 1
     if activation_status == "pending":
+        try:
+            pending_paths = runtime_paths_from_args(argparse.Namespace(runtime=runtime, home=home))
+        except lifecycle.LifecycleError:
+            pending_paths = None
         print("PERSONA_BUILD_STATE=VALIDATED_NOT_ENABLED")
         print("MUST_CONTINUE=true")
         print("TERMINAL_ALLOWED=false")
@@ -3648,31 +4074,51 @@ def emit_gate(
         print("FINAL_REPORT_ALLOWED=false")
         print("STATUS_REPLY_ALLOWED=true")
         print("LOOP_STAGE=ENABLE")
-        print("NEXT_ACTION=按用户要求启用当前会话或持久作用域；完成后以 enabled 重新运行 completion-gate。")
+        if pending_paths is not None and not pending_paths.supports_persistent_activation:
+            print("NEXT_ACTION=当前运行时只提供 Skill 级加载；运行 register 注册角色，再以 registered 重跑 completion-gate。")
+        else:
+            print("NEXT_ACTION=按用户要求启用当前会话或持久作用域；完成后以 enabled 重新运行 completion-gate。")
         return 1
 
-    if activation_status == "enabled":
+    if activation_status in {"enabled", "registered"}:
         namespace = argparse.Namespace(runtime=runtime, home=home)
         try:
             paths = runtime_paths_from_args(namespace)
-            verification = lifecycle.verify_activation(
-                paths,
-                role_path=root,
-                expected_role_hash=lifecycle.directory_hash(root),
-            )
+            if activation_status == "enabled":
+                verification = lifecycle.verify_activation(
+                    paths,
+                    role_path=root,
+                    expected_role_hash=lifecycle.directory_hash(root),
+                )
+            elif paths.supports_persistent_activation:
+                verification = {
+                    "valid": False,
+                    "errors": ["该运行时支持持久启用，registered 不能代替可验证的 enabled 回执"],
+                }
+            else:
+                verification = lifecycle.verify_registration(
+                    paths,
+                    role_path=root,
+                    expected_role_hash=lifecycle.directory_hash(root),
+                )
         except lifecycle.LifecycleError as exc:
             verification = {"valid": False, "errors": [str(exc)]}
         if not verification["valid"]:
-            print("PERSONA_BUILD_STATE=VALIDATED_ACTIVATION_STALE")
+            state = "VALIDATED_ACTIVATION_STALE" if activation_status == "enabled" else "VALIDATED_REGISTRATION_STALE"
+            print("PERSONA_BUILD_STATE=" + state)
             print("MUST_CONTINUE=true")
             print("TERMINAL_ALLOWED=false")
             print("USER_REPORT_ALLOWED=false")
             print("FINAL_REPORT_ALLOWED=false")
             print("STATUS_REPLY_ALLOWED=true")
             print("LOOP_STAGE=ENABLE")
-            print("ERROR_CODES=activation.receipt_invalid")
+            error_code = "activation.receipt_invalid" if activation_status == "enabled" else "registration.invalid"
+            print("ERROR_CODES=" + error_code)
             print("ACTIVATION_ERRORS=" + " | ".join(str(item) for item in verification["errors"]))
-            print(f'NEXT_ACTION=重新运行 enable "{root}"，回读全局绑定并生成新回执，然后重跑 completion-gate。')
+            if activation_status == "enabled":
+                print(f'NEXT_ACTION=重新运行 enable "{root}"，回读全局绑定并生成新回执，然后重跑 completion-gate。')
+            else:
+                print(f'NEXT_ACTION=重新运行 register "{root}"，核对角色路径与哈希，然后重跑 completion-gate。')
             return 1
 
     print("PERSONA_BUILD_STATE=COMPLETE")
@@ -3706,8 +4152,10 @@ def cmd_runtime_detect(args: argparse.Namespace) -> int:
             "runtime": paths.runtime,
             "config_root": str(paths.config_root),
             "skills_root": str(paths.skills_root),
-            "instruction_path": str(paths.instruction_path),
+            "instruction_path": str(paths.instruction_path) if paths.instruction_path is not None else None,
             "registry_path": str(paths.registry_path),
+            "supports_persistent_activation": paths.supports_persistent_activation,
+            "activation_note": paths.activation_note,
         }
         if args.json:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
@@ -3746,7 +4194,9 @@ def cmd_status(args: argparse.Namespace) -> int:
         payload = {
             "runtime": paths.runtime,
             "active_role_id": registry["active_role_id"],
-            "instruction_path": str(paths.instruction_path),
+            "instruction_path": str(paths.instruction_path) if paths.instruction_path is not None else None,
+            "supports_persistent_activation": paths.supports_persistent_activation,
+            "activation_note": paths.activation_note,
             "activation": verification,
         }
         if args.json:
@@ -3754,6 +4204,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         else:
             print("RUNTIME=%s" % paths.runtime)
             print("ACTIVE_ROLE_ID=%s" % (registry["active_role_id"] or "none"))
+            print("PERSISTENT_ACTIVATION_SUPPORTED=%s" % str(paths.supports_persistent_activation).lower())
             print("ACTIVATION_VALID=%s" % str(verification["valid"]).lower())
             if verification["errors"]:
                 print("ACTIVATION_ERRORS=" + " | ".join(verification["errors"]))
@@ -3773,6 +4224,7 @@ def validate_for_activation(root: Path) -> dict[str, object]:
 def cmd_enable(args: argparse.Namespace) -> int:
     try:
         paths = runtime_paths_from_args(args)
+        lifecycle.persistent_instruction_path(paths)
         root = Path(args.path).expanduser().resolve()
         validation = validate_for_activation(root)
         metadata = role_registration_metadata(root, validation, args)
@@ -3784,6 +4236,28 @@ def cmd_enable(args: argparse.Namespace) -> int:
         print("BINDING_PATH=%s" % paths.instruction_path)
         print("RECEIPT_PATH=%s" % paths.receipt_path)
         print("BINDING_CHANGED=%s" % str(result["binding"]["changed"]).lower())
+        return 0
+    except lifecycle.LifecycleError as exc:
+        return print_lifecycle_error(exc)
+
+
+def cmd_register(args: argparse.Namespace) -> int:
+    try:
+        paths = runtime_paths_from_args(args)
+        root = Path(args.path).expanduser().resolve()
+        validation = validate_for_activation(root)
+        metadata = role_registration_metadata(root, validation, args)
+        role = lifecycle.register_role(paths, role_path=root, **metadata)
+        verification = lifecycle.verify_registration(
+            paths, role_path=root, expected_role_hash=metadata["validation_hash"]
+        )
+        if not verification["valid"]:
+            raise lifecycle.LifecycleError("角色注册回读验证失败：%s" % "; ".join(verification["errors"]))
+        print("ACTIVATION_STATUS=registered")
+        print("RUNTIME=%s" % paths.runtime)
+        print("ROLE_ID=%s" % role["id"])
+        print("PERSISTENT_ACTIVATION_SUPPORTED=%s" % str(paths.supports_persistent_activation).lower())
+        print("REGISTRY_PATH=%s" % paths.registry_path)
         return 0
     except lifecycle.LifecycleError as exc:
         return print_lifecycle_error(exc)
@@ -3883,8 +4357,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     def add_runtime_args(command_parser: argparse.ArgumentParser) -> None:
+        def runtime_value(value: str) -> str:
+            return "auto" if value.strip().lower() == "auto" else lifecycle.normalize_runtime(value)
+
         command_parser.add_argument(
-            "--runtime", choices=("auto",) + lifecycle.SUPPORTED_RUNTIMES, default="auto",
+            "--runtime", type=runtime_value, choices=("auto",) + lifecycle.SUPPORTED_RUNTIMES, default="auto",
             help="目标运行时；auto 仅在存在唯一可靠信号时成功",
         )
         command_parser.add_argument(
@@ -3917,9 +4394,9 @@ def build_parser() -> argparse.ArgumentParser:
     iteration_parser.add_argument("path", help="角色人格 Skill 目录")
     iteration_parser.add_argument(
         "--activation-status",
-        choices=("pending", "enabled", "not-requested"),
+        choices=("pending", "enabled", "registered", "not-requested"),
         default="pending",
-        help="当前启用状态；创建循环通常保持 pending，完成启用后改为 enabled",
+        help="当前状态；创建循环通常保持 pending，完整启用后用 enabled，Skill-only 注册后用 registered",
     )
     add_runtime_args(iteration_parser)
     iteration_parser.set_defaults(func=cmd_iteration_gate)
@@ -3930,9 +4407,9 @@ def build_parser() -> argparse.ArgumentParser:
     gate_parser.add_argument("path", help="角色人格 Skill 目录")
     gate_parser.add_argument(
         "--activation-status",
-        choices=("pending", "enabled", "not-requested"),
+        choices=("pending", "enabled", "registered", "not-requested"),
         default="pending",
-        help="enabled 表示已启用；not-requested 仅用于用户明确要求只创建不启用",
+        help="enabled 表示持久启用，registered 表示 Skill-only 注册，not-requested 仅用于明确只创建",
     )
     add_runtime_args(gate_parser)
     gate_parser.set_defaults(func=cmd_completion_gate)
@@ -3959,6 +4436,14 @@ def build_parser() -> argparse.ArgumentParser:
     enable_parser.add_argument("--source-identity", help="来源角色或人物身份")
     add_runtime_args(enable_parser)
     enable_parser.set_defaults(func=cmd_enable)
+
+    register_parser = subparsers.add_parser("register", help="正式校验并注册角色，不伪造全局启用")
+    register_parser.add_argument("path", help="角色 Skill 目录")
+    register_parser.add_argument("--display-name", help="可选显示名；默认从角色 Skill 读取")
+    register_parser.add_argument("--alias", action="append", default=[], help="角色精确别名；可重复")
+    register_parser.add_argument("--source-identity", help="来源角色或人物身份")
+    add_runtime_args(register_parser)
+    register_parser.set_defaults(func=cmd_register)
 
     switch_parser = subparsers.add_parser("switch", help="按稳定 ID、显示名或别名切换活动角色")
     switch_parser.add_argument("query", help="精确角色稳定 ID、显示名或别名")

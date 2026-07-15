@@ -44,16 +44,32 @@ class RuntimeLifecycleTests(unittest.TestCase):
     def test_all_runtime_default_paths_are_native_and_separate(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
-            codex = self.paths(root, "codex")
-            claude = self.paths(root, "claude")
-            opencode = self.paths(root, "opencode")
-            self.assertEqual(codex.skills_root, root / "home" / ".codex" / "skills")
-            self.assertEqual(codex.instruction_path, root / "home" / ".codex" / "AGENTS.md")
-            self.assertEqual(claude.skills_root, root / "home" / ".claude" / "skills")
-            self.assertEqual(claude.instruction_path, root / "home" / ".claude" / "CLAUDE.md")
-            self.assertEqual(opencode.skills_root, root / "home" / ".config" / "opencode" / "skills")
-            self.assertEqual(opencode.instruction_path, root / "home" / ".config" / "opencode" / "AGENTS.md")
-            self.assertEqual(len({codex.registry_path, claude.registry_path, opencode.registry_path}), 3)
+            home = root / "home"
+            expectations = {
+                "codex": (home / ".codex" / "skills", home / ".codex" / "AGENTS.md"),
+                "claude": (home / ".claude" / "skills", home / ".claude" / "CLAUDE.md"),
+                "opencode": (home / ".config" / "opencode" / "skills", home / ".config" / "opencode" / "AGENTS.md"),
+                "workbuddy": (home / ".workbuddy" / "skills", home / ".workbuddy" / "SOUL.md"),
+                "codebuddy": (home / ".codebuddy" / "skills", home / ".codebuddy" / "CODEBUDDY.md"),
+                "kimi-code": (home / ".kimi-code" / "skills", home / ".kimi-code" / "AGENTS.md"),
+                "mimo-code": (home / ".agents" / "skills", None),
+                "github-copilot": (home / ".copilot" / "skills", home / ".copilot" / "copilot-instructions.md"),
+                "gemini": (home / ".gemini" / "skills", home / ".gemini" / "GEMINI.md"),
+                "cursor": (home / ".cursor" / "skills", None),
+                "cline": (home / ".cline" / "skills", home / "Documents" / "Cline" / "Rules" / "persona-skill.md"),
+                "trae": (home / ".trae" / "skills", None),
+                "qoderwork": (home / ".qoderwork" / "skills", None),
+                "deepcode": (home / ".agents" / "skills", None),
+                "openclaw": (home / ".openclaw" / "skills", home / ".openclaw" / "workspace" / "AGENTS.md"),
+                "hermes": (home / ".hermes" / "skills", home / ".hermes" / "SOUL.md"),
+            }
+            self.assertEqual(tuple(expectations), lifecycle.SUPPORTED_RUNTIMES)
+            paths_by_runtime = {runtime: self.paths(root, runtime) for runtime in lifecycle.SUPPORTED_RUNTIMES}
+            for runtime, (skills_root, instruction_path) in expectations.items():
+                with self.subTest(runtime=runtime):
+                    self.assertEqual(paths_by_runtime[runtime].skills_root, skills_root)
+                    self.assertEqual(paths_by_runtime[runtime].instruction_path, instruction_path)
+            self.assertEqual(len({paths.registry_path for paths in paths_by_runtime.values()}), len(expectations))
 
     def test_runtime_environment_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -61,9 +77,13 @@ class RuntimeLifecycleTests(unittest.TestCase):
             codex = lifecycle.resolve_runtime_paths("codex", home=root, env={"CODEX_HOME": str(root / "cx")})
             claude = lifecycle.resolve_runtime_paths("claude", home=root, env={"CLAUDE_CONFIG_DIR": str(root / "cl")})
             opencode = lifecycle.resolve_runtime_paths("opencode", home=root, env={"XDG_CONFIG_HOME": str(root / "xdg")})
+            kimi = lifecycle.resolve_runtime_paths("kimi", home=root, env={"KIMI_CODE_HOME": str(root / "kimi")})
+            hermes = lifecycle.resolve_runtime_paths("hermes-agent", home=root, env={"HERMES_HOME": str(root / "hm")})
             self.assertEqual(codex.config_root, root / "cx")
             self.assertEqual(claude.config_root, root / "cl")
             self.assertEqual(opencode.config_root, root / "xdg" / "opencode")
+            self.assertEqual(kimi.config_root, root / "kimi")
+            self.assertEqual(hermes.config_root, root / "hm")
 
     def test_codex_nonempty_override_has_priority_but_empty_override_does_not(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -82,6 +102,7 @@ class RuntimeLifecycleTests(unittest.TestCase):
         with self.assertRaises(lifecycle.LifecycleError):
             lifecycle.detect_runtime(env={"CODEX_HOME": "x", "CLAUDE_CONFIG_DIR": "y"}, home=Path.cwd())
         self.assertEqual(lifecycle.detect_runtime(env={"PERSONA_RUNTIME": "opencode"})[0], "opencode")
+        self.assertEqual(lifecycle.detect_runtime(requested="MiMoCodex")[0], "mimo-code")
 
     def test_binding_preserves_utf8_bom_crlf_and_original_content(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -231,8 +252,34 @@ class RuntimeLifecycleTests(unittest.TestCase):
             self.assertEqual(reset["open_threads"], [])
             self.assertEqual(reset["relationship_summary"], "")
 
+    def test_state_v2_fields_migrate_bound_and_reject_invalid_intensity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = self.paths(Path(temporary))
+            _, role = self.make_role(paths)
+            state_path = lifecycle.role_state_path(paths, role["id"])
+            lifecycle.reset_state(paths, role["id"])
+            legacy = json.loads(state_path.read_text(encoding="utf-8"))
+            legacy.pop("emotion_intensity", None)
+            legacy.pop("shared_callbacks", None)
+            state_path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
+            migrated = lifecycle.load_state(paths, role["id"])
+            self.assertEqual(migrated["emotion_intensity"], 0)
+            result = lifecycle.update_state(paths, role["id"], {
+                "emotion_intensity": 3,
+                "emotion_cause_summary": "连续失败让警觉残留",
+                "relationship_stage": "能直接指出分歧的同伴",
+                "unresolved_tension": "是否继续冒险写入线上数据",
+                "shared_callbacks": ["共同回调%d" % index for index in range(20)],
+                "recent_background_ids": ["BIO-%02d" % index for index in range(40)],
+            })
+            self.assertEqual(result["state"]["emotion_intensity"], 3)
+            self.assertEqual(len(result["state"]["shared_callbacks"]), 8)
+            self.assertEqual(len(result["state"]["recent_background_ids"]), 24)
+            with self.assertRaises(lifecycle.LifecycleError):
+                lifecycle.update_state(paths, role["id"], {"emotion_intensity": 4})
+
     def test_each_runtime_full_isolated_lifecycle(self) -> None:
-        for runtime in lifecycle.SUPPORTED_RUNTIMES:
+        for runtime in lifecycle.PERSISTENT_ACTIVATION_RUNTIMES:
             with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as temporary:
                 paths = self.paths(Path(temporary).resolve(), runtime)
                 first_path, first = self.make_role(paths, "persona-first", "角色一", ("一号",))
@@ -248,6 +295,40 @@ class RuntimeLifecycleTests(unittest.TestCase):
                 result = lifecycle.delete_role(paths, "角色一")
                 self.assertEqual(result["deleted_role_id"], first["id"])
                 self.assertFalse(first_path.exists())
+
+    def test_skill_only_runtimes_register_but_refuse_fake_persistent_activation(self) -> None:
+        for runtime in lifecycle.SKILL_ONLY_RUNTIMES:
+            with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as temporary:
+                paths = self.paths(Path(temporary).resolve(), runtime)
+                role_path, role = self.make_role(paths)
+                check = lifecycle.verify_registration(paths, role_path, lifecycle.directory_hash(role_path))
+                self.assertTrue(check["valid"], check["errors"])
+                with self.assertRaises(lifecycle.LifecycleError):
+                    lifecycle.enable_registered_role(paths, role["id"])
+                self.assertIsNone(lifecycle.load_registry(paths)["active_role_id"])
+
+    def test_trae_cn_copy_resolves_from_actual_skill_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary).resolve()
+            skill_root = home / ".trae-cn" / "skills" / "persona"
+            paths = lifecycle.resolve_runtime_paths("trae", home=home, env={}, skill_root=skill_root)
+            self.assertEqual(paths.config_root, home / ".trae-cn")
+
+    def test_registration_verification_rejects_external_tampered_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            paths = self.paths(root, "cursor")
+            _, role = self.make_role(paths)
+            external = root / role["id"]
+            external.mkdir()
+            (external / "SKILL.md").write_text("external", encoding="utf-8")
+            registry = lifecycle.load_registry(paths)
+            registry["roles"][role["id"]]["path"] = str(external)
+            registry["roles"][role["id"]]["validation_hash"] = lifecycle.directory_hash(external)
+            lifecycle.save_registry(paths, registry)
+            check = lifecycle.verify_registration(paths, external, lifecycle.directory_hash(external))
+            self.assertFalse(check["valid"])
+            self.assertIn("注册角色不在当前运行时 Skills 根目录直属安全位置", check["errors"])
 
 
 if __name__ == "__main__":

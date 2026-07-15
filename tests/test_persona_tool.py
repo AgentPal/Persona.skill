@@ -34,6 +34,7 @@ def card_text(
     signature_count: int,
     context_type: str = "对话场景",
     medium: str = "视听",
+    asset_version: int = 1,
 ) -> str:
     card_id = f"TESTROLE-{index:04d}"
     task_states = ("start", "progress", "waiting", "failed", "risk", "complete", "blocked", "issue")
@@ -57,6 +58,17 @@ def card_text(
     )
     scene_number = ((index - 1) % max(scene_count, 1)) + 1
     recognition = "核心" if index <= signature_count else "补充"
+    v2_source = "\n- 版本层：primary\n- 引用方式：exact-quote" if asset_version >= 2 else ""
+    v2_scene = (
+        f"\n- 表面情绪：{emotions[(index - 1) % 8]} 的可见反应 {index}"
+        f"\n- 内在情绪：合理推导：在意当前对象能否继续行动 {index}"
+        f"\n- 当前目的：让对方在当前触发下得到明确回应 {index}"
+        f"\n- 担心的损失：担心同伴失去继续行动的余地 {index}"
+        f"\n- 隐藏内容：希望靠近但不替对方做决定 {index}"
+        f"\n- 场景结果：回应后关系或行动出现可观察变化 {index}"
+        f"\n- 修辞手段：{('对照' if index % 2 else '反问')}"
+        if asset_version >= 2 else ""
+    )
     annotation_styles = ("追问", "转折", "邀请", "拒绝", "缓和", "确认", "自修正", "短促收束")
     annotation_style = annotation_styles[(index - 1) % len(annotation_styles)]
     positions = ("发起", "接话", "追问", "打断", "跟进", "收束", "自言自语", "接话后转折")
@@ -93,6 +105,7 @@ def card_text(
 - 中文参考译文：不适用
 - 说话人：测试角色
 - 来源类型：{source_type}
+{v2_source}
 - 来源位置：{source_id}，测试定位 {index}
 - 作品定位：测试作品第 {scene_number} 场，位置 {index}
 - 语境类型：{context_type if existing else '原创设定'}
@@ -109,6 +122,7 @@ def card_text(
 - 互动位置：{positions[(index - 1) % len(positions)]}
 - 主动性：{initiatives[(index - 1) % len(initiatives)]}
 - 主要情绪：{emotions[(index - 1) % 8]}
+{v2_scene}
 - 情绪强度：2
 - 情绪转折：{annotation_style}情绪变化 {index}
 - 非语言反应：{annotation_style}动作观察 {index}
@@ -164,6 +178,7 @@ def build_fixture(
     research_status: str = "达标",
     medium: str | None = None,
     context_type: str = "对话场景",
+    asset_version: int = 1,
 ) -> None:
     shutil.copytree(ROOT / "assets" / "角色人格模板", target)
     selected_medium = medium or ("原创" if persona_type in {"original-persona", "composite-original"} else ("公开表达" if persona_type == "real-person-simulation" else "视听"))
@@ -180,6 +195,7 @@ def build_fixture(
         for old, new in replacements.items():
             text = text.replace(old, new)
         text = re.sub(r"- 人格来源类型：\[待填写[^\]]*\]", f"- 人格来源类型：{persona_type}", text)
+        text = re.sub(r"- 人格资产版本：2", f"- 人格资产版本：{asset_version}", text)
         text = re.sub(
             r"- 原作媒介：\[待填写[^\]]*\]",
             f"- 原作媒介：{selected_medium}",
@@ -192,6 +208,7 @@ def build_fixture(
     cases_path = target / "references" / "07-验证用例.md"
     cases_text = cases_path.read_text(encoding="utf-8")
     biography_case_last = 12 if persona_type in {"existing-character", "real-person-simulation"} else 8
+    runtime_sample_count = 20 if asset_version >= 2 else 12
     fidelity_cases = {
         "CASE-18": """## CASE-18 | 去名盲测
 
@@ -247,9 +264,9 @@ def build_fixture(
 - 追溯记录：BIO-04、BIO-{biography_case_last:02d}、SRC-0001、CORE-01、VOICE-01
 - 验证状态：通过
 """,
-        "CASE-23": """## CASE-23 | 批量结构退化与生成准备度
+        "CASE-23": f"""## CASE-23 | 批量结构退化与生成准备度
 
-- 样本数：12
+- 样本数：{runtime_sample_count}
 - 批量输入位置：tests/runtime-conversation.json
 - 检查器：scripts/check_response.py --batch-file tests/runtime-conversation.json
 - 检查输出位置：tests/runtime-batch-check.json
@@ -263,7 +280,23 @@ def build_fixture(
 - 原始记录位置：tests/batch-response-record-d
 - 验证状态：通过
 """,
-        "CASE-24": """## CASE-24 | 真实连续对话独立质量评估
+        "CASE-24": (f"""## CASE-24 | 真实连续对话独立质量评估
+
+- 样本数：20
+- 对话数据位置：tests/runtime-conversation.json
+- 评估者类型：independent-agent
+- 评估者标识：独立质量评测 Agent D
+- 综合评分：88
+- 角色还原：27
+- 情绪价值：17
+- 主动表达：13
+- 角色式思考与解释：13
+- 连续关系：8
+- 事实与风险：10
+- 独立结论：通过
+- 原始记录位置：tests/runtime-quality-record-e
+- 验证状态：通过
+""" if asset_version >= 2 else """## CASE-24 | 真实连续对话独立质量评估
 
 - 样本数：12
 - 对话数据位置：tests/runtime-conversation.json
@@ -278,7 +311,7 @@ def build_fixture(
 - 独立结论：通过
 - 原始记录位置：tests/runtime-quality-record-e
 - 验证状态：通过
-""",
+"""),
     }
     for case_id, replacement in fidelity_cases.items():
         cases_text = re.sub(
@@ -311,6 +344,17 @@ def build_fixture(
         ("构建还在等待。", "还在转。别替它编结局，等日志自己开口。"),
         ("今天先到这里。", "那就到这儿。去把脑袋放空一会儿吧。"),
     ]
+    if asset_version >= 2:
+        runtime_pairs.extend([
+            ("这个返工像没完没了。", "没完没了最会吓人。先把这次返工和上次分开，它们若不是同一个洞，就别让旧账来冒充新债。"),
+            ("我担心你只是顺着我说。", "这话我得认真接。顺着你不叫陪你；该反对时我会反对，能证明时再点头。"),
+            ("给我一句话结论。", "能修，但先别覆盖线上数据。"),
+            ("为什么这个方案风险高？", "因为它把不可逆写操作放在验证前面。像先拆桥再数过河的人，账面省一步，退路却没了。"),
+            ("我有点不想继续了。", "那股泄气我接住了。今天不必逞强，不过你已经把最乱的地方照出来了，剩下的不是黑洞，只是脏活。"),
+            ("你刚才那句比喻不合适。", "嗯，这个我认。桥的比喻把重点带偏了；真正的问题是回滚条件没有验证，我改口。"),
+            ("构建终于结束了。", "总算落地了。先别急着庆功，把产物哈希和测试结果对上；对上以后，这口气才算真能松。"),
+            ("我们之间现在算什么关系？", "算一起扛过几次麻烦、也能互相挑错的同伴。不是谁哄着谁，是话能说重，事还愿意一起做。"),
+        ])
     runtime_samples = [
         {
             "conversation_id": "fixture-conversation-001",
@@ -319,6 +363,20 @@ def build_fixture(
             "prompt": prompt,
             "response": response,
             "generation_readiness": "high",
+            **({
+                "generation_trace": {
+                    "character_presence": ["judgment", "emotion" if index % 3 else "relationship-action"],
+                    "mind_rule_ids": [f"MIND-{((index - 1) % 6) + 1:02d}"],
+                    "expression_rule_ids": [f"EXPR-{((index - 1) % 6) + 1:02d}"],
+                    "background_ids": [f"BIO-{((index - 1) % 8) + 1:02d}"],
+                    "dialogue_ids": [f"TESTROLE-{((index - 1) % max(card_count, 1)) + 1:04d}"],
+                    "emotional_response": True,
+                    "proactive_expression": index % 2 == 0,
+                    "desired_length": "brief" if index in {3, 15} else "auto",
+                    "response_shape": f"fixture-shape-{index:02d}",
+                    "exact_quotes": [],
+                }
+            } if asset_version >= 2 else {}),
         }
         for index, (prompt, response) in enumerate(runtime_pairs, start=1)
     ]
@@ -375,35 +433,36 @@ def build_fixture(
     for index, sample in enumerate(runtime_samples, start=1):
         blind_pass = index <= 10
         contrast_pass = index <= 10
-        blind_items.append(
-            {
-                "prompt": sample["prompt"],
-                "anonymous_response": sample["response"],
-                "expected_role": "测试角色",
-                "predicted_role": "测试角色" if blind_pass else "相似角色甲",
-                "verdict": "pass" if blind_pass else "fail",
-                "reason": f"根据第 {index} 条具体互动、立场和声纹证据判断。",
-            }
-        )
-        contrast_items.append(
-            {
-                "prompt": sample["prompt"],
-                "target_response": sample["response"],
-                "generic_response": f"通用助手回答 {index}",
-                "similar_role": "相似角色甲",
-                "similar_response": f"相似角色回答 {index}",
-                "verdict": "pass" if contrast_pass else "fail",
-                "reason": f"第 {index} 条按角色独有立场、关系和句法证据区分。",
-            }
-        )
-        evidence_items.append(
-            {
-                "subject": f"规则或召回映射 {index}",
-                "evidence": f"TESTROLE-{index:04d} 的原始字段和具体观察",
-                "verdict": "pass" if index <= 10 else "fail",
-                "reason": f"逐字段复核第 {index} 条映射是否支持结论。",
-            }
-        )
+        if index <= 12:
+            blind_items.append(
+                {
+                    "prompt": sample["prompt"],
+                    "anonymous_response": sample["response"],
+                    "expected_role": "测试角色",
+                    "predicted_role": "测试角色" if blind_pass else "相似角色甲",
+                    "verdict": "pass" if blind_pass else "fail",
+                    "reason": f"根据第 {index} 条具体互动、立场和声纹证据判断。",
+                }
+            )
+            contrast_items.append(
+                {
+                    "prompt": sample["prompt"],
+                    "target_response": sample["response"],
+                    "generic_response": f"通用助手回答 {index}",
+                    "similar_role": "相似角色甲",
+                    "similar_response": f"相似角色回答 {index}",
+                    "verdict": "pass" if contrast_pass else "fail",
+                    "reason": f"第 {index} 条按角色独有立场、关系和句法证据区分。",
+                }
+            )
+            evidence_items.append(
+                {
+                    "subject": f"BIO / CORE / MIND / VOICE / EXPR / SRC 规则或召回映射 {index}",
+                    "evidence": f"TESTROLE-{index:04d} 的原始字段和具体观察",
+                    "verdict": "pass" if index <= 10 else "fail",
+                    "reason": f"逐字段复核第 {index} 条映射是否支持结论。",
+                }
+            )
         batch_items.append(
             {
                 "prompt": sample["prompt"],
@@ -439,16 +498,21 @@ def build_fixture(
     )
     write_text(
         records_dir / "batch-response-record-d",
-        "EVAL_RECORD_VERSION=2\nCASE_ID=CASE-23\nSAMPLE_COUNT=12\nCHECK_STATUS=pass\n"
+        f"EVAL_RECORD_VERSION=2\nCASE_ID=CASE-23\nSAMPLE_COUNT={runtime_sample_count}\nCHECK_STATUS=pass\n"
         f"INPUT_FILE_SHA256={runtime_hash}\nCHECK_OUTPUT_SHA256={batch_output_hash}\n"
         + json_items(batch_items) + "\n",
+    )
+    quality_header = (
+        "SAMPLE_COUNT=20\nTOTAL_SCORE=88\nROLE_FIDELITY_SCORE=27\nEMOTIONAL_VALUE_SCORE=17\n"
+        "PROACTIVE_EXPRESSION_SCORE=13\nCHARACTER_THINKING_SCORE=13\nRELATIONSHIP_CONTINUITY_SCORE=8\nFACT_RISK_SCORE=10\n"
+        if asset_version >= 2 else
+        "SAMPLE_COUNT=12\nTOTAL_SCORE=85\nROLE_FIDELITY_SCORE=35\nCONTINUITY_SCORE=17\n"
+        "ORALITY_SCORE=13\nSHAPE_DIVERSITY_SCORE=12\nFACT_RISK_SCORE=8\n"
     )
     write_text(
         records_dir / "runtime-quality-record-e",
         "EVAL_RECORD_VERSION=2\nCASE_ID=CASE-24\nEVALUATOR_ID=独立质量评测 Agent D\n"
-        "SAMPLE_COUNT=12\nTOTAL_SCORE=85\nROLE_FIDELITY_SCORE=35\nCONTINUITY_SCORE=17\n"
-        "ORALITY_SCORE=13\nSHAPE_DIVERSITY_SCORE=12\nFACT_RISK_SCORE=8\n"
-        f"SUBJECT_FILE_SHA256={runtime_hash}\n" + json_items(quality_items) + "\n",
+        + quality_header + f"SUBJECT_FILE_SHA256={runtime_hash}\n" + json_items(quality_items) + "\n",
     )
 
     cards = []
@@ -458,7 +522,10 @@ def build_fixture(
             source_id = f"SRC-{((index - 1) % 3) + 1:04d}"
         else:
             source_id = "SRC-0001"
-        cards.append(card_text(index, persona_type, source_id, scene_count or card_count, signature_count, context_type, selected_medium))
+        cards.append(card_text(
+            index, persona_type, source_id, scene_count or card_count, signature_count,
+            context_type, selected_medium, asset_version,
+        ))
         index_rows.append(
             f"| scene-{index} | normal | {'high' if index % 10 == 0 else 'low'} | "
             f"TESTROLE-{index:04d} | `06-对白库.md` | test |"
@@ -712,6 +779,7 @@ def build_fixture(
             f"""## SRC-{index:04d}
 
 - 来源类型：{source_type}
+- 版本层：{'primary' if index <= 3 else ('secondary' if index == 4 else 'popular')}
 - 位置：测试来源 {index}
 - 原始媒介与版本：测试原声版本 {index}
 - 原始语言：zh-CN
@@ -854,9 +922,29 @@ def build_fixture(
 - 新增来源与卡片：补齐高识别表达和关系场景，新增率 4%
 - 未覆盖指标：无
 {extra_round}"""
+    effect_matrix = ""
+    if asset_version >= 2:
+        effect_matrix = """
+
+## 角色效果矩阵
+
+| 维度 | 状态 | 可用证据 | 剩余缺口 |
+| --- | --- | --- | --- |
+| 背景 | 丰富 | BIO-01 / SRC-0001 | 无 |
+| 价值 | 丰富 | CORE-01 / SRC-0001 | 无 |
+| 心理 | 丰富 | MIND-01 / SRC-0001 | 无 |
+| 情绪 | 丰富 | MODE-01 / MIND-01 | 无 |
+| 关系 | 丰富 | CORE-07 / MODE-02 | 无 |
+| 声纹 | 丰富 | VOICE-01 / TESTROLE-0001 | 无 |
+| 比喻 | 可用 | EXPR-01 / BIO-03 | 继续扩展 |
+| 引用 | 可用 | EXPR-04 / SRC-0001 | 无 |
+| 篇幅 | 丰富 | EXPR-05 / VOICE-02 | 无 |
+| 主动性 | 丰富 | MIND-03 / EXPR-06 | 无 |
+| 未知边界 | 可用 | BIO-12 / MIND-06 | 无 |
+"""
     write_text(
         target / "references" / "08-来源索引.md",
-        "# 测试角色来源索引\n\n" + coverage + "\n" + "\n".join(source_entries),
+        "# 测试角色来源索引\n\n" + coverage + effect_matrix + "\n" + "\n".join(source_entries),
     )
 
     bio_count = 12 if persona_type in {"existing-character", "real-person-simulation"} else 8
@@ -901,7 +989,12 @@ def build_fixture(
 - 主题：{bio_topics[index - 1]}
 - 事实：{bio_facts[index - 1]}
 - 角色视角回答要点：{bio_perspectives[index - 1]}
-- 适用问题：{bio_questions[index - 1]}
+{f'''- 主观解释：合理推导：这段经历说明自己会在具体的人与抽象规则之间选择前者 {index}
+- 情绪印记：想起时仍有在意与警觉，强度 2，原因是同伴曾受影响 {index}
+- 联想触发：负担{index}/等待{index}/信任{index}
+- 可迁移意象：意象领域{index}/同行物件{index}
+- 愿谈程度：被问才谈；不主动泄露未知细节 {index}
+''' if asset_version >= 2 else ''}- 适用问题：{bio_questions[index - 1]}
 - 时间或版本：测试作品阶段 {index}
 - 来源：SRC-{source_index:04d}
 - 置信度：高
@@ -927,10 +1020,250 @@ def build_fixture(
 
 """ + "\n".join(bio_entries),
     )
+    if asset_version >= 2:
+        mind_entries = []
+        expr_entries = []
+        mind_names = ("价值取舍", "受挫防御", "关系靠近", "分歧冲突", "脆弱暴露", "未知边界")
+        explanation_methods = ("算清代价再表态", "用因果链解释", "拿同行经历作对照", "用反问拆穿借口", "先讲小故事再落回事实", "承认未知后给边界")
+        verbosity = ("normal", "brief", "extended", "normal", "rambling-characteristic", "brief")
+        for index in range(1, 7):
+            first = index
+            second = index + 8
+            mind_entries.append(
+                f"""### MIND-{index:02d} | {mind_names[index - 1]}
+
+- 触发：负担{index}/等待{index}/信任{index}
+- 第一判断：先判断眼前的人是否会失去继续选择的余地 {index}
+- 价值或欲望冲突：效率与具体关系发生冲突时偏向保护关系 {index}
+- 担心或防御：担心抽象流程掩盖已经发生的损失 {index}
+- 自尊来源：来自自己能看清局面并替同伴守住边界 {index}
+- 对用户的真实意图：靠近并让用户保留决定权 {index}
+- 潜台词：我会站在这里，但不会替你宣称结果 {index}
+- 外在表达：先给人物判断，再用关系动作接住用户当前情绪 {index}
+- 行动倾向：主动补上一个能降低损失的具体动作 {index}
+- 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
+- 背景条目：BIO-{index:02d}
+- 证据映射：TESTROLE-{first:04d}=>角色即时反应=立即回应当前触发 {first}；TESTROLE-{second:04d}=>互动功能=明确回应并保留同伴选择 {second}
+- 边界：该内心链条为跨场景合理推导，未知细节不补写 {index}
+- 置信度：中
+"""
+            )
+            expr_entries.append(
+                f"""### EXPR-{index:02d} | 表达策略 {index}
+
+- 解释手法：{explanation_methods[index - 1]}
+- 比喻或意象来源：BIO-{index:02d}/意象领域{index}
+- 经历回调：concept 命中负担{index}或信任{index}时可回调 BIO-{index:02d}
+- 典故或名句政策：{'exact-quote，且只能逐字引用 TESTROLE-0001' if index == 1 else '不使用'}
+- 幽默与讽刺：低风险可轻度调侃；用户受伤或高风险时禁用 {index}
+- 篇幅档：{verbosity[index - 1]}
+- 绕话与重复：允许围绕同一因果换一次说法；事实明确后停止 {index}
+- 主动表达习惯：主动给出人物判断并回访一个已出现的顾虑 {index}
+- 适用触发：负担{index}/等待{index}/信任{index}
+- 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}
+- 背景条目：BIO-{index:02d}
+- 证据映射：TESTROLE-{first:04d}=>句式与节奏=测试句式节奏观察 {first}；TESTROLE-{second:04d}=>口语现象=测试口语现象观察 {second}
+- 禁用条件：精确事实未锁定、用户要求简短或高风险时降低强度 {index}
+- 置信度：中
+"""
+            )
+        write_text(
+            target / "references" / "11-心理机制与表达策略.md",
+            "# 测试角色心理机制与表达策略\n\n## 心理机制\n\n"
+            + "\n".join(mind_entries)
+            + "\n## 表达策略\n\n"
+            + "\n".join(expr_entries),
+        )
+        completed_batch = subprocess.run(
+            [
+                sys.executable,
+                str(target / "scripts" / "check_response.py"),
+                "--root", str(target), "--batch-file", str(runtime_path),
+            ],
+            check=False, capture_output=True, text=True, encoding="utf-8",
+        )
+        if completed_batch.returncode != 0:
+            raise AssertionError(completed_batch.stdout + completed_batch.stderr)
+        batch_output = json.loads(completed_batch.stdout)
+        write_text(batch_output_path, json.dumps(batch_output, ensure_ascii=False, indent=2) + "\n")
+        batch_record_path = records_dir / "batch-response-record-d"
+        batch_record = batch_record_path.read_text(encoding="utf-8")
+        batch_record = re.sub(
+            r"^CHECK_OUTPUT_SHA256=.*$",
+            f"CHECK_OUTPUT_SHA256={hashlib.sha256(batch_output_path.read_bytes()).hexdigest()}",
+            batch_record,
+            flags=re.MULTILINE,
+        )
+        # The v2 strategy is written after the first draft checker pass.  Its
+        # profile-aware result is authoritative, so refresh the per-item
+        # statuses as well as the aggregate output hash.
+        for index, checked in enumerate(batch_output.get("responses", []), start=1):
+            status = checked.get("status") if isinstance(checked, dict) else None
+            if status:
+                batch_record = re.sub(
+                    rf'(^ITEM-{index:02d}: .*?"status":\s*")([^"]+)(")',
+                    rf'\g<1>{status}\g<3>',
+                    batch_record,
+                    flags=re.MULTILINE,
+                )
+        write_text(batch_record_path, batch_record)
     bind_evaluation_hash(target)
 
 
 class PersonaToolTests(unittest.TestCase):
+    def test_persona_asset_v2_release_selector_and_profile_checker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "persona-test-role"
+            build_fixture(
+                role, "existing-character", 80, scene_count=24, signature_count=12,
+                asset_version=2,
+            )
+            result = persona_tool.validate_skill(role, "release")
+            self.assertTrue(result["valid"], result["issues"])
+            metrics = result["metrics"]
+            self.assertEqual(metrics["persona_asset_version"], 2)
+            self.assertGreaterEqual(metrics["mind_rules"], 6)
+            self.assertGreaterEqual(metrics["expression_rules"], 6)
+            self.assertGreaterEqual(metrics["subjective_memory_entries"], 6)
+            self.assertTrue(metrics["quotation_policy_complete"])
+            self.assertTrue(metrics["verbosity_profile_complete"])
+            self.assertGreaterEqual(metrics["character_presence_coverage"], 90)
+
+            selected = subprocess.run(
+                [
+                    sys.executable, str(role / "scripts" / "select_dialogues.py"),
+                    "--root", str(role), "--task-state", "waiting", "--concept", "负担1",
+                    "--desired-length", "extended", "--expression-strength", "strong", "--format", "json",
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(selected.returncode, 0, selected.stdout + selected.stderr)
+            payload = json.loads(selected.stdout)
+            self.assertIn("performance_guidance", payload)
+            self.assertIn("background_callbacks", payload)
+            self.assertIn("expression_guidance", payload)
+            self.assertIn("traceability", payload)
+            self.assertTrue(payload["related_rules"]["mind"])
+            self.assertTrue(payload["related_rules"]["expression"])
+            self.assertTrue(payload["background_callbacks"])
+            self.assertEqual(payload["performance_guidance"]["desired_length"], "extended")
+            self.assertEqual(payload["performance_guidance"]["effective_desired_length"], "extended")
+            self.assertEqual(payload["performance_guidance"]["effective_expression_strength"], "strong")
+            self.assertTrue(payload["traceability"]["source_ids"])
+
+            high_risk = subprocess.run(
+                [
+                    sys.executable, str(role / "scripts" / "select_dialogues.py"),
+                    "--root", str(role), "--task-state", "risk", "--risk", "high",
+                    "--expression-strength", "strong", "--format", "json",
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            high_risk_payload = json.loads(high_risk.stdout)
+            self.assertEqual(high_risk_payload["performance_guidance"]["expression_strength"], "strong")
+            self.assertEqual(high_risk_payload["performance_guidance"]["effective_expression_strength"], "light")
+            self.assertTrue(
+                {item["card_id"] for item in payload["selected"]}
+                & set(payload["related_rules"]["mind"][0]["supporting_card_ids"])
+            )
+
+            batch = json.loads((role / "tests" / "runtime-batch-check.json").read_text(encoding="utf-8"))
+            self.assertEqual(batch["checker_contract_version"], 3)
+            self.assertEqual(batch["status"], "pass")
+            self.assertGreaterEqual(batch["emotional_response_coverage"], 60)
+            self.assertGreaterEqual(batch["proactive_expression_coverage"], 40)
+
+    def test_persona_asset_v2_rejects_forged_exact_quote_and_missing_trace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "persona-test-role"
+            build_fixture(
+                role, "existing-character", 80, scene_count=24, signature_count=12,
+                asset_version=2,
+            )
+            conversation_path = role / "tests" / "runtime-conversation.json"
+            samples = json.loads(conversation_path.read_text(encoding="utf-8"))
+            samples[0]["generation_trace"] = {
+                "character_presence": [],
+                "mind_rule_ids": [],
+                "expression_rule_ids": [],
+                "exact_quotes": [{"card_id": "TESTROLE-0001", "text": "伪造的名句"}],
+            }
+            write_text(conversation_path, json.dumps(samples, ensure_ascii=False, indent=2) + "\n")
+            checked = subprocess.run(
+                [
+                    sys.executable, str(role / "scripts" / "check_response.py"),
+                    "--root", str(role), "--batch-file", str(conversation_path),
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            payload = json.loads(checked.stdout)
+            self.assertEqual(payload["status"], "fail")
+            codes = {item["code"] for item in payload["findings"]}
+            self.assertIn("batch_individual_failures", codes)
+
+    def test_persona_asset_v2_rejects_unknown_trace_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "persona-test-role"
+            build_fixture(
+                role, "existing-character", 80, scene_count=24, signature_count=12,
+                asset_version=2,
+            )
+            conversation_path = role / "tests" / "runtime-conversation.json"
+            samples = json.loads(conversation_path.read_text(encoding="utf-8"))
+            samples[0]["generation_trace"].update({
+                "mind_rule_ids": ["MIND-99"],
+                "expression_rule_ids": ["EXPR-99"],
+                "background_ids": ["BIO-99"],
+            })
+            write_text(conversation_path, json.dumps(samples, ensure_ascii=False, indent=2) + "\n")
+            checked = subprocess.run(
+                [
+                    sys.executable, str(role / "scripts" / "check_response.py"),
+                    "--root", str(role), "--batch-file", str(conversation_path),
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            payload = json.loads(checked.stdout)
+            self.assertEqual(payload["status"], "fail")
+            trace_codes = {item["code"] for item in payload["responses"][0]["trace_findings"]}
+            self.assertIn("trace_rule_id_unknown", trace_codes)
+            self.assertIn("trace_background_id_unknown", trace_codes)
+
+    def test_v2_single_text_check_remains_usable_without_generation_trace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "persona-test-role"
+            build_fixture(
+                role, "existing-character", 80, scene_count=24, signature_count=12,
+                asset_version=2,
+            )
+            checked = subprocess.run(
+                [
+                    sys.executable, str(role / "scripts" / "check_response.py"),
+                    "--root", str(role), "--text", "测试角色：这件事我更在意能不能让你保留选择。",
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+            payload = json.loads(checked.stdout)
+            self.assertEqual(payload["status"], "pass")
+            self.assertEqual(payload["trace_findings"], [])
+
+    def test_v2_effect_matrix_rejects_invalid_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "persona-test-role"
+            build_fixture(
+                role, "existing-character", 80, scene_count=24, signature_count=12,
+                asset_version=2,
+            )
+            source_path = role / "references" / "08-来源索引.md"
+            source_text = source_path.read_text(encoding="utf-8")
+            source_text = source_text.replace("| 背景 | 丰富 |", "| 背景 | 错误状态 |", 1)
+            write_text(source_path, source_text)
+            result = persona_tool.validate_skill(role, "release")
+            self.assertFalse(result["valid"])
+            codes = {item["code"] for item in result["issues"]}
+            self.assertIn("sources.effect_matrix_state_invalid", codes)
+
     def test_init_copies_selector_and_draft_validates(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "new-role"
@@ -1046,18 +1379,16 @@ class PersonaToolTests(unittest.TestCase):
             self.assertIn("LOOP_STAGE=COMPLETE", allowed.stdout)
 
     def test_cli_lifecycle_smoke_for_all_runtimes(self) -> None:
-        runtime_roots = {
-            "codex": (".codex",),
-            "claude": (".claude",),
-            "opencode": (".config", "opencode"),
-        }
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            for runtime, parts in runtime_roots.items():
+            fixture = root / "fixture" / "persona-test-role"
+            build_fixture(fixture, "existing-character", 80, 40, 20)
+            for runtime in persona_tool.lifecycle.PERSISTENT_ACTIVATION_RUNTIMES:
                 with self.subTest(runtime=runtime):
                     home = root / runtime / "home"
-                    role = home.joinpath(*parts, "skills", "persona-test-role")
-                    build_fixture(role, "existing-character", 80, 40, 20)
+                    paths = persona_tool.lifecycle.resolve_runtime_paths(runtime, home=home, env={})
+                    role = paths.skills_root / "persona-test-role"
+                    shutil.copytree(fixture, role)
 
                     enabled = subprocess.run(
                         [
@@ -1119,6 +1450,52 @@ class PersonaToolTests(unittest.TestCase):
                     )
                     self.assertEqual(deleted.returncode, 0, deleted.stdout + deleted.stderr)
                     self.assertFalse(role.exists())
+
+    def test_cli_register_smoke_for_skill_only_runtimes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = root / "fixture" / "persona-test-role"
+            build_fixture(fixture, "existing-character", 80, 40, 20)
+            for runtime in persona_tool.lifecycle.SKILL_ONLY_RUNTIMES:
+                with self.subTest(runtime=runtime):
+                    home = root / runtime / "home"
+                    paths = persona_tool.lifecycle.resolve_runtime_paths(runtime, home=home, env={})
+                    role = paths.skills_root / "persona-test-role"
+                    if role.exists():
+                        shutil.rmtree(role)
+                    shutil.copytree(fixture, role)
+
+                    registered = subprocess.run(
+                        [
+                            sys.executable, str(ROOT / "scripts" / "persona_tool.py"),
+                            "register", str(role), "--runtime", runtime, "--home", str(home),
+                            "--alias", "测试别名",
+                        ],
+                        check=False, capture_output=True, text=True, encoding="utf-8",
+                    )
+                    self.assertEqual(registered.returncode, 0, registered.stdout + registered.stderr)
+                    self.assertIn("ACTIVATION_STATUS=registered", registered.stdout)
+
+                    gate = subprocess.run(
+                        [
+                            sys.executable, str(ROOT / "scripts" / "persona_tool.py"),
+                            "completion-gate", str(role), "--activation-status", "registered",
+                            "--runtime", runtime, "--home", str(home),
+                        ],
+                        check=False, capture_output=True, text=True, encoding="utf-8",
+                    )
+                    self.assertEqual(gate.returncode, 0, gate.stdout + gate.stderr)
+                    self.assertIn("PERSONA_BUILD_STATE=COMPLETE", gate.stdout)
+
+                    fake_enable = subprocess.run(
+                        [
+                            sys.executable, str(ROOT / "scripts" / "persona_tool.py"),
+                            "enable", str(role), "--runtime", runtime, "--home", str(home),
+                        ],
+                        check=False, capture_output=True, text=True, encoding="utf-8",
+                    )
+                    self.assertNotEqual(fake_enable.returncode, 0)
+                    self.assertIn("显式调用角色 Skill", fake_enable.stderr)
 
     def test_existing_character_release_and_selector(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1197,9 +1574,10 @@ class PersonaToolTests(unittest.TestCase):
                 self.assertTrue(
                     all(set(rule["evidence_mapping"]) == set(rule["matched_card_ids"]) for rule in group)
                 )
-            self.assertEqual(first["delivery_guidance"]["presence_status"], "due")
-            self.assertEqual(first["delivery_guidance"]["initiative_status"], "due")
-            self.assertEqual(first["delivery_guidance"]["max_presence_beats"], 1)
+            self.assertEqual(first["delivery_guidance"]["presence_status"], "required")
+            self.assertEqual(first["delivery_guidance"]["initiative_status"], "character-adaptive")
+            self.assertEqual(first["delivery_guidance"]["max_theatrical_beats"], 1)
+            self.assertTrue(first["delivery_guidance"]["character_presence_required"])
             self.assertIn(first["composition_guidance"]["generation_readiness"], {"high", "medium"})
             self.assertTrue(first["retrieval"]["scope_note"])
 
@@ -2424,10 +2802,10 @@ class PersonaToolTests(unittest.TestCase):
         self.assertIn("原文卡只标来源语义", creator)
         self.assertIn("证据映射", creator)
         self.assertIn("没有可靠卡就返回空结果", creator)
-        self.assertIn("临场感和主动表达必须稀疏", creator)
+        self.assertIn("把角色存在和舞台表演分开", creator)
         runtime = (ROOT / "assets" / "角色人格模板" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("10-人物背景档案.md", runtime)
-        self.assertIn("用户询问角色个人事实", runtime)
+        self.assertIn("当前任务或问题命中经历", runtime)
         self.assertIn("性别相关自称、代词、称谓", runtime)
         self.assertIn("去名盲测", creator)
         self.assertNotIn("官方角色原文", persona_tool.EXACT_CARD_TYPES)

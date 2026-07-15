@@ -1,42 +1,40 @@
 # Persona.skill
 
-Persona.skill 可以把虚构角色、现实人物模拟、原创人格或混合参考人格，蒸馏成一个独立、可验证、可全局启停的角色人格 Skill，供 Codex App/CLI、Claude Code 和 OpenCode 使用。这里把有时被称作“Codex Code”的产品目标按 Claude Code 适配。
+Persona.skill 可以把虚构角色、现实人物模拟、原创人格或混合参考人格，蒸馏成一个独立、可验证、可管理的角色人格 Skill。现支持 Codex App/CLI、Claude Code、OpenCode、WorkBuddy、CodeBuddy、Kimi Code、MiMo Code（兼容 `MiMoCodex` 别名）、GitHub Copilot、Gemini CLI、Cursor、Cline、TRAE、QoderWork、Deep Code、OpenClaw 和 Hermes。
 
-角色人格启用后，Agent 会用目标角色的身份、性格和表达方式与你交流；回答和必要的任务进度会以 `角色名：` 开头，让你清楚知道人格正在生效。普通问题直接回答，不会先播报读取对白卡、运行选择器或思考过程。每个角色还带一份有来源的人物背景档案：姓名、性别身份与称谓、年龄阶段、经历、关系、能力、偏好和世界观会持续影响日常工作中的判断、比喻、称呼和行动，不是只有被问“你是谁”时才使用。代码、命令、文件、日志、事实和风险判断不会被改写。
+角色人格启用后，Agent 会用目标角色的身份、性格和表达方式与你交流；回答和必要的任务进度会以 `角色名：` 开头。人物资产 v2 不只保存口头禅：它会蒸馏角色的价值冲突、第一判断、防御、自尊、关系意图、主观记忆、比喻来源、典故政策、解释习惯和人物专属篇幅。每条有实质内容的回复都要出现人物自己的判断、情绪或关系动作；代码、命令、日志、事实和风险仍保持准确。
 
-本仓库是创建和管理人格的“母 Skill”，不内置任何具体角色语料。生成的角色使用 ASCII 稳定 ID `persona-<slug>`，但显示名与回复前缀可以是任意 Unicode；每个 Runtime 同时只启用一个全局角色。
+本仓库是创建和管理人格的“母 Skill”，不内置任何具体角色语料。生成的角色使用 ASCII 稳定 ID `persona-<slug>`，但显示名与回复前缀可以是任意 Unicode；支持持久绑定的 Runtime 同时只启用一个全局角色。
 
 ## 安装
 
-选择正在使用的 Runtime，运行对应的一行命令：
+需要 Python 3.8+ 和 Git。一条跨平台命令会把 Persona.skill 安装到全部受支持 Agent 的用户级 Skill 目录；再次运行会安全更新所有干净的 Git 安装：
 
-```powershell
-# Codex
-git clone https://github.com/AgentPal/Persona.skill.git "$HOME/.codex/skills/persona"
-
-# Claude Code
-git clone https://github.com/AgentPal/Persona.skill.git "$HOME/.claude/skills/persona"
-
-# OpenCode
-git clone https://github.com/AgentPal/Persona.skill.git "$HOME/.config/opencode/skills/persona"
+```bash
+python -c "import urllib.request as u;exec(u.urlopen('https://raw.githubusercontent.com/AgentPal/Persona.skill/main/install.py').read())"
 ```
 
-若设置了 `CODEX_HOME`、`CLAUDE_CONFIG_DIR`、`OPENCODE_CONFIG_DIR` 或 `XDG_CONFIG_HOME`，把目标根目录替换成对应配置目录。安装后重新开启一次会话。
+安装器默认选择 `all`，TRAE 同时覆盖国际版 `~/.trae/skills` 与国内版 `~/.trae-cn/skills`；MiMo Code 和 Deep Code 共用开放标准目录 `~/.agents/skills`，其余运行时使用各自目录。相同目标会自动去重。安装后重新开启 Agent 会话。
 
-全局路径依据各 Runtime 的原生规则：[Codex 全局指令](https://learn.chatgpt.com/docs/agent-configuration/agents-md)、[Claude Code Skills](https://code.claude.com/docs/en/slash-commands)、[OpenCode Skills](https://opencode.ai/docs/skills) 与 [OpenCode Rules](https://opencode.ai/docs/rules)。
+只安装部分 Agent 时，在仓库中运行：
 
-已经用 Git 安装过时，不要再次 `git clone`。进入安装目录更新即可：
-
-```powershell
-# Codex
-git -C "$HOME/.codex/skills/persona" pull --ff-only
-
-# Claude Code
-git -C "$HOME/.claude/skills/persona" pull --ff-only
-
-# OpenCode
-git -C "$HOME/.config/opencode/skills/persona" pull --ff-only
+```bash
+python install.py --agent codex,claude,opencode
 ```
+
+`--agent` 可重复，并接受 `kimicode`、`MiMoCodex`、`copilot`、`gemini-cli`、`deep-code` 等常见别名。安装器只会 `git clone` 缺失目录，或对来源一致、工作区干净的现有 Git 安装执行 `pull --ff-only`；非 Git 目录、来源不一致或有本地改动时会停止该目标，不覆盖用户文件。可先运行 `python install.py --dry-run` 查看全部落盘位置。
+
+原有三种运行时继续使用原路径，并保留环境变量覆盖：
+
+| Runtime | Persona.skill 路径 |
+|---|---|
+| Codex App / CLI | `$CODEX_HOME/skills/persona`，默认 `~/.codex/skills/persona` |
+| Claude Code | `$CLAUDE_CONFIG_DIR/skills/persona`，默认 `~/.claude/skills/persona` |
+| OpenCode | `$OPENCODE_CONFIG_DIR/skills/persona`；否则 `$XDG_CONFIG_HOME/opencode/skills/persona` |
+
+原有路径继续遵循 [Codex 全局指令](https://learn.chatgpt.com/docs/agent-configuration/agents-md)、[Claude Code Skills](https://code.claude.com/docs/en/slash-commands)、[OpenCode Skills](https://opencode.ai/docs/skills) 与 [OpenCode Rules](https://opencode.ai/docs/rules)。
+
+路径和能力依据各产品当前的 Skill / instruction 约定，包括 [WorkBuddy Skills](https://www.codebuddy.cn/docs/workbuddy/From-Beginner-to-Expert-Guide/Function-Description/Skills-Market)、[CodeBuddy Skills](https://www.codebuddy.cn/docs/cli/skills)、[Kimi Code 数据目录](https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/data-locations.html)、[MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code)、[GitHub Copilot Skills](https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-skills)、[Gemini CLI Skills](https://geminicli.com/docs/cli/using-agent-skills/)、[Cursor Agent Skills](https://cursor.com/changelog/2-4)、[Cline Skills](https://docs.cline.bot/customization/skills)、[TRAE Changelog](https://www.trae.ai/changelog)、[QoderWork Skills](https://docs.qoder.com/qoderwork/skills)、[Deep Code](https://github.com/lessweb/deepcode-cli)、[OpenClaw Skills](https://github.com/openclaw/openclaw/blob/main/docs/tools/skills.md) 与 [Hermes Skills](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/skills.md)。完整矩阵见 [运行时适配规范](references/06-运行时适配规范.md)。
 
 ## 使用
 
@@ -46,9 +44,11 @@ git -C "$HOME/.config/opencode/skills/persona" pull --ff-only
 使用 Persona.skill，根据《Lycoris Recoil》中的锦木千束角色创建一个角色人格 Skill。
 ```
 
-只给角色名就可以开始。Persona.skill 默认沿用原角色名和当前主要版本；只有人物/版本歧义、同名冲突或你主动要求自定义时才询问。它会在同一个任务中持续完成“调研 → 蒸馏 → 生成 → 验证 → 修复 → 启用”，不会停在目录初始化、资料不足或单次校验失败，也不需要你再次回复“继续”。中途询问进度时，Agent 会回答后继续执行。
+只给角色名就可以开始。Persona.skill 默认沿用原角色名和当前主要版本；只有人物/版本歧义、同名冲突或你主动要求自定义时才询问。它会在同一个任务中持续完成“调研 → 蒸馏 → 生成 → 验证 → 修复 → 启用或注册”，不会停在目录初始化、资料不足或单次校验失败，也不需要你再次回复“继续”。中途询问进度时，Agent 会回答后继续执行。
 
-创建通过后，角色立即作用于当前会话，并写入当前 Runtime 的用户级全局绑定；以后新会话无需再次调用 Persona.skill。绑定前已经打开的其他旧会话无法自动改变，需要重启或重新加载。如果只想生成文件，请明确说“只创建不启用”。
+创建通过后，完整启用型运行时会让角色立即作用于当前会话，并写入当前 Runtime 的用户级全局绑定；以后新会话无需再次调用 Persona.skill。绑定前已经打开的其他旧会话无法自动改变，需要重启或重新加载。如果只想生成文件，请明确说“只创建不启用”。
+
+完整启用型运行时包括 Codex App/CLI、Claude Code、OpenCode、WorkBuddy、CodeBuddy、Kimi Code、GitHub Copilot、Gemini CLI、Cline、OpenClaw 和 Hermes。MiMo Code、Cursor、TRAE、QoderWork 与 Deep Code 当前公开提供 Skill 加载，但没有可由脚本安全维护的用户级全局人格文件；Persona.skill 会正式校验并注册角色，随后由你在会话中点名角色 Skill，不会把“已安装”冒充成“已全局启用”。
 
 启用后，你会看到类似这样的消息：
 
@@ -72,9 +72,17 @@ git -C "$HOME/.config/opencode/skills/persona" pull --ff-only
 删除锦木千束这个角色。
 ```
 
-名称、别名和稳定 ID 都可用于切换；只有精确名称命中多个角色时才会询问。删除活动角色会先停用，只删除该角色 Skill、受限连续状态和注册项，不删除 Persona.skill、其他角色或外部资料。
+名称、别名和稳定 ID 都可用于切换；只有精确名称命中多个角色时才会询问。完整启用型运行时支持持久切换和停用；Skill-only 运行时支持注册、列出、状态、连续状态与删除。删除活动角色会先停用，只删除该角色 Skill、受限连续状态和注册项，不删除 Persona.skill、其他角色或外部资料。
 
-“全局”只作用于当前 Runtime 的当前用户。Codex、Claude Code、OpenCode 各自维护独立注册表和活动角色，不会静默修改另外两个 Runtime。角色只保留关系摘要、情绪残留、信任、承诺、未完话题和近期表达编号；发生有意义变化时才原子更新，不保存完整聊天记录，也不跨设备同步。
+“全局”只作用于当前 Runtime 的当前用户。各 Runtime 维护独立注册表、启用回执和连续状态，不会静默修改其他 Runtime；MiMo Code 与 Deep Code 只共享 `~/.agents/skills` 下的角色文件，不共享活动状态。角色只保留关系摘要与阶段、情绪残留/强度/原因、未消退分歧、信任、承诺、未完话题、共同回调和近期表达/背景编号；发生有意义变化时才原子更新，不保存完整聊天记录，也不跨设备同步。
+
+旧角色不会因母 Skill 更新立即失效。要升级到人物资产 v2，可先运行结构迁移器，再让 Persona.skill 根据证据重蒸馏 `MIND- / EXPR-`、主观背景和验证记录；迁移器只补显式字段与最新运行脚本，不会替角色编造心理：
+
+```bash
+python scripts/migrate_asset_v2.py /absolute/path/to/persona-role
+```
+
+迁移后必须重新执行正式校验和独立对话评测；旧评测哈希与全局启用回执会失效，校验通过后再重新启用。
 
 ## 需要准备什么
 
@@ -96,7 +104,7 @@ Persona.skill 只交付正式版。资料丰富的已有角色或现实人物，
 
 第一轮资料不足时会自动扩大站点、资料类型、版本、别名和语言继续调研；确认合理可访问范围确实已穷尽后，才会使用当前收集到的全部原文正式交付，并写明扩大范围和缺口。运行时先判断当前任务对应的原作互动语义，再筛选 0–6 张证据完整的原文卡，只加载通过逐卡证据映射的角色规律，最后直接使用短句或根据原口语、原口气和原节奏即时创作。
 
-为了让工作不只是“套口吻”，角色每轮都会接住用户最后一个具体信息和未完话题，不会把连续对话当成一串新工单；信息足够时也允许自然停住，不强行追问。角色还可以偶尔回访之前提过的顾虑、对当前真实可见的文件、报错或测试结果形成一处具体画面，或主动接手一个有用的小动作。这些临场增强有间隔控制，一次最多突出一个；不会每轮塞“嗯、啊”、编造听见叹气、端来饮料或表演现实动作。
+为了让工作不只是“套口吻”，角色每轮都会接住用户最后一个具体信息和未完话题，并持续保留人物判断、情绪和关系动作。猪八戒式算账与经历比喻、唐僧式因果和有证据的唠叨、克制人物的短句，都由各自资料决定，不会被削成同一种开发人员口吻。强故事、名句和故意啰嗦只在人物习惯与场景支持时出现；虚构感官、星号动作和无关小剧场仍被禁止。
 
 使用现实人物资料时，请确认你有权使用，并把生成结果明确当作角色模拟，不要用于冒充本人。
 

@@ -1,4 +1,4 @@
 interface:
   display_name: "Persona.skill"
-  short_description: "蒸馏、验证并全局管理可持续陪伴工作的角色人格 Skill"
-  default_prompt: "使用 $persona 创建或管理角色人格；默认沿用来源原名，循环完成调研、蒸馏、修复、实测和用户级全局启用，直到 completion-gate 核验实际绑定与回执后允许交付；不要停在初始化或进度汇报。"
+  short_description: "蒸馏、验证并跨运行时管理可持续陪伴工作的角色人格 Skill"
+  default_prompt: "使用 $persona 创建或管理角色人格；默认沿用来源原名，循环完成调研、蒸馏、修复和实测，再按当前运行时能力持久启用或注册，直到 completion-gate 核验绑定回执或注册哈希后允许交付；不要停在初始化或进度汇报。"
