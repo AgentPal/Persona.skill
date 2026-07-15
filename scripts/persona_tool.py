@@ -38,6 +38,9 @@ ANTI_HEADING_RE = re.compile(r"^###\s+(ANTI-\d{2})\s+\|", re.MULTILINE | re.IGNO
 BIO_HEADING_RE = re.compile(r"^###\s+(BIO-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 MIND_HEADING_RE = re.compile(r"^###\s+(MIND-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 EXPR_HEADING_RE = re.compile(r"^###\s+(EXPR-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+COMPOSITE_WORK_HEADING_RE = re.compile(
+    r"^###\s+(WORK-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE
+)
 PLACEHOLDER_RE = re.compile(
     r"\{\{[A-Z0-9_]+\}\}|\[待填写[^\]]*\]|\b(?:TODO|TBD)\b", re.IGNORECASE
 )
@@ -241,6 +244,12 @@ REQUIRED_RESEARCH_ROUND_FIELDS = (
     "本轮排除数", "本轮新增率", "新增来源与卡片", "未覆盖指标",
 )
 MIN_EXHAUSTION_ROUNDS = 4
+COMPOSITE_WORK_MIN_COUNT = 2
+COMPOSITE_WORK_MIN_CARDS = 4
+COMPOSITE_WORK_MIN_UNIQUE = 4
+COMPOSITE_WORK_MIN_EVIDENCE_UNITS = 2
+COMPOSITE_WORK_MIN_SCENE_DIMENSIONS = 4
+COMPOSITE_MAX_SINGLE_WORK_SHARE = 0.45
 NON_EXPANSION_SCOPE_RE = re.compile(
     r"^(?:无|没有|未扩大|同上|相同|重复|仅复查|继续复查|既有范围|原范围|不适用|none|n/a)[。.!！]?$",
     re.IGNORECASE,
@@ -350,6 +359,9 @@ def cmd_name_gate(args: argparse.Namespace) -> int:
                 print("MUST_WAIT_FOR_NAME_CHOICE=false")
                 print("CREATE_LOOP_LOCK=active")
                 print("RESPONSE_MODE=CONTINUE_TOOL_LOOP")
+                print("FEEDBACK_REQUIRED=true")
+                print("FEEDBACK_STAGE=名称确认")
+                print("NEXT_FEEDBACK=阶段：名称确认；已完成：自定义人物名已确定；下一步：进入资料盘点并开始逐轮采集。")
                 return 0
             print("NAME_GATE_STATUS=awaiting-name")
             print("当前创建请求没有指定人物名，创建前必须先设定人物名。")
@@ -358,6 +370,9 @@ def cmd_name_gate(args: argparse.Namespace) -> int:
             print("MUST_WAIT_FOR_NAME=true")
             print("CREATE_LOOP_LOCK=waiting-for-user-name")
             print("RESPONSE_MODE=WAIT_FOR_NAME")
+            print("FEEDBACK_REQUIRED=true")
+            print("FEEDBACK_STAGE=名称确认")
+            print("NEXT_FEEDBACK=阶段：名称确认；已完成：发现请求未给人物名；下一步：等待用户先设定人物名，之后才允许调研。")
             print("禁止在设定人物名之前联网、读取资料、初始化目录、蒸馏或生成角色。")
             return 0
         print("NAME_GATE_STATUS=awaiting-choice")
@@ -369,6 +384,9 @@ def cmd_name_gate(args: argparse.Namespace) -> int:
         print("MUST_WAIT_FOR_NAME_CHOICE=true")
         print("CREATE_LOOP_LOCK=waiting-for-user-name-choice")
         print("RESPONSE_MODE=WAIT_FOR_NAME_CHOICE")
+        print("FEEDBACK_REQUIRED=true")
+        print("FEEDBACK_STAGE=名称确认")
+        print("NEXT_FEEDBACK=阶段：名称确认；已完成：识别到原角色名；下一步：等待用户选择原名或自定义名，之后才允许调研。")
         print("禁止在选择前联网、读取资料、初始化目录、蒸馏或生成角色。")
         return 0
 
@@ -395,6 +413,9 @@ def cmd_name_gate(args: argparse.Namespace) -> int:
     print("MUST_WAIT_FOR_NAME_CHOICE=false")
     print("CREATE_LOOP_LOCK=active")
     print("RESPONSE_MODE=CONTINUE_TOOL_LOOP")
+    print("FEEDBACK_REQUIRED=true")
+    print("FEEDBACK_STAGE=名称确认")
+    print("NEXT_FEEDBACK=阶段：名称确认；已完成：显示名已锁定；下一步：进入资料盘点与逐轮采集。")
     return 0
 
 
@@ -473,6 +494,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     print("FINAL_REPORT_ALLOWED=false")
     print("STATUS_REPLY_ALLOWED=true")
     print("LOOP_STAGE=RESEARCH")
+    print("FEEDBACK_REQUIRED=true")
+    print("FEEDBACK_STAGE=初始化")
+    print("NEXT_FEEDBACK=阶段：初始化；已完成：角色工作目录与模板已建立；下一步：资料盘点，然后按轮次收集候选、核验、排除并回报数量。")
     print("NEXT_ACTION=立即继续调研并只填写人物身份基线、来源索引与原始表达卡；每批运行 research-gate。闸门通过前禁止批量生成规则、工作迁移和测试。")
     print(f"STAGE_GATE_COMMAND=python scripts/persona_tool.py research-gate \"{target}\"")
     print("禁止在初始化后结束当前任务、等待用户说继续，或把此目录当作已创建的人格 Skill 交付。")
@@ -592,6 +616,14 @@ def iter_expr_blocks(text: str) -> Iterable[tuple[str, str]]:
     boundaries = sorted(item.start() for pattern in (MIND_HEADING_RE, EXPR_HEADING_RE) for item in pattern.finditer(text))
     for match in matches:
         end = next((position for position in boundaries if position > match.start()), len(text))
+        yield match.group(1).upper(), text[match.end() : end]
+
+
+def iter_composite_work_blocks(text: str) -> Iterable[tuple[str, str]]:
+    """Yield explicit per-work coverage records for composite characters."""
+    matches = list(COMPOSITE_WORK_HEADING_RE.finditer(text))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         yield match.group(1).upper(), text[match.end() : end]
 
 
@@ -981,6 +1013,11 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         "research_expansion_recorded": False,
         "research_rounds": 0,
         "research_expansion_rounds": 0,
+        "research_candidates": 0,
+        "research_formal": 0,
+        "research_pending": 0,
+        "research_rejected": 0,
+        "research_round_summary": [],
         "cards": 0,
         "exact_original_cards": 0,
         "performance_verified_cards": 0,
@@ -1019,6 +1056,15 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         "character_presence_coverage": 0,
         "effect_matrix_rows": 0,
         "effect_matrix_complete": False,
+        "composite_work_count": 0,
+        "composite_work_coverage_complete": False,
+        "composite_work_cards_min": 0,
+        "composite_work_evidence_min": 0,
+        "composite_work_scene_dimensions_min": 0,
+        "composite_work_card_share_max": 0.0,
+        "composite_work_gaps": [],
+        "composite_detected_work_counts": [],
+        "independent_quality_pass": False,
         "semantic_diversity_failures": 0,
         "rule_evidence_mappings": 0,
     }
@@ -1164,6 +1210,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     metrics["persona_asset_version"] = persona_asset_version
     metrics["original_medium"] = original_medium
     metrics["original_language"] = original_language
+    metrics["composite_work_coverage_complete"] = persona_type != "composite-character"
 
     strategy_path = root / "references" / "11-心理机制与表达策略.md"
     if persona_asset_version >= 2 and not strategy_path.is_file():
@@ -1243,12 +1290,12 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         and research_audit_complete
         and all(has_substantive_value(value) for value in research_fields.values())
     )
-    if level == "release" and research_status not in {"达标", "已穷尽"}:
+    if level == "release" and research_status not in {"进行中", "达标", "已穷尽"}:
         add_issue(
             issues,
             "error",
             "research.status_invalid",
-            "调研状态必须是“达标”或“已穷尽”",
+            "调研状态必须是“进行中”“达标”或“已穷尽”",
             sources_path,
             root,
         )
@@ -1341,6 +1388,12 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 f"达标时仍有 {pending_material_count} 条待核验表达；必须继续核验、明确排除，或在确实穷尽后改走“已穷尽”路径",
                 sources_path, root,
             )
+        if persona_type == "composite-character" and research_status == "已穷尽" and pending_material_count not in {None, 0}:
+            add_issue(
+                issues, "error", "research.pending_unresolved",
+                f"跨作品集合标记已穷尽但仍有 {pending_material_count} 条待核验表达；必须逐片核验或明确排除，不能用未处理候选掩盖作品覆盖缺口",
+                sources_path, root,
+            )
         if research_blocks and not research_rounds_complete:
             add_issue(
                 issues, "error", "research.round_audit_incomplete",
@@ -1387,10 +1440,18 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     metrics["research_profile"] = research_profile
     metrics["research_saturated"] = saturation_complete
     metrics["research_candidates"] = candidate_material_count or 0
+    metrics["research_formal"] = declared_formal_cards or 0
+    metrics["research_pending"] = pending_material_count or 0
     metrics["research_rejected"] = rejected_material_count or 0
     metrics["research_expansion_recorded"] = expansion_recorded
     metrics["research_rounds"] = research_rounds
     metrics["research_expansion_rounds"] = len(normalized_expansion_scopes)
+    metrics["research_round_summary"] = [
+        f"{round_id}:候选{integer_field(block, '本轮候选数') or 0}/正式{integer_field(block, '本轮正式收录数') or 0}/"
+        f"待核验{integer_field(block, '本轮待核验数') or 0}/排除{integer_field(block, '本轮排除数') or 0}/"
+        f"新增率{(percentage_values(block, '本轮新增率') or [0])[0]:g}%"
+        for round_id, block in research_blocks
+    ]
 
     if skill_prefix and core_prefix and skill_prefix != core_prefix:
         add_issue(
@@ -1861,8 +1922,18 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
     metrics["unique_original_expressions"] = len(normalized_original_owners)
     metrics["derived_cards"] = len(noncanonical_card_ids)
     metrics["distinct_emotions_and_intents"] = len(dimensions)
+    if persona_type == "composite-character":
+        detected_work_counts: Counter[str] = Counter()
+        for block in card_blocks_by_id.values():
+            location = field_value(block, "作品定位") or ""
+            titles = re.findall(r"《[^》]+》", location)
+            detected_work_counts[titles[0] if titles else "未识别作品"] += 1
+        metrics["composite_detected_work_counts"] = [
+            f"{title}={count}" for title, count in detected_work_counts.most_common()
+        ]
     for annotation_field, entries in annotation_values.items():
-        counts = Counter(value for value, _, _ in entries if value)
+        boilerplate_exempt = {"未核验原声", "不适用", "未知", "缺失"}
+        counts = Counter(value for value, _, _ in entries if value and value not in boilerplate_exempt)
         if not counts:
             continue
         repeated_value, repeated_count = counts.most_common(1)[0]
@@ -1921,7 +1992,11 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 index_path,
                 root,
             )
-        index_ids = set(re.findall(r"\b[A-Z0-9][A-Z0-9-]*-\d{4}\b", index_text))
+        dialogue_prefixes = {card_id.rsplit("-", 1)[0] for card_id in all_ids}
+        index_ids = {
+            item for item in re.findall(r"\b[A-Z0-9][A-Z0-9-]*-\d{4}\b", index_text)
+            if item.rsplit("-", 1)[0] in dialogue_prefixes
+        }
         extra_index_ids = sorted(index_ids - set(all_ids))
         if extra_index_ids and level == "release":
             add_issue(
@@ -2592,6 +2667,44 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 root,
             )
 
+    # A role cannot be enabled from a self-declared or stale score sheet.  The
+    # independent CASE-24 result is a separate hard gate from the source
+    # counts, so a large corpus never masks a weak real-dialogue evaluation.
+    quality_threshold_flags = [bool(condition) for condition, _code, _message in quality_thresholds]
+    quality_evaluator_type = field_value(case_blocks.get("CASE-24", ""), "评估者类型")
+    quality_evaluator_id = field_value(case_blocks.get("CASE-24", ""), "评估者标识") or ""
+    quality_evaluator_ready = (
+        quality_evaluator_type in ALLOWED_EVALUATOR_TYPES
+        and not re.search(r"同一|生成者|当前agent|自评|self|待|尚未|未", quality_evaluator_id, re.IGNORECASE)
+    )
+    quality_related_error = any(
+        issue.severity == "error"
+        and (
+            issue.code.startswith("tests.quality")
+            or issue.code in {
+                "tests.evaluator_type_invalid", "tests.self_evaluation_forbidden", "tests.evaluator_pending",
+                "tests.runtime_dataset_mismatch", "tests.quality_record_stale", "tests.runtime_item_mismatch",
+            }
+        )
+        for issue in issues
+    )
+    metrics["independent_quality_pass"] = bool(
+        quality_threshold_flags
+        and all(quality_threshold_flags)
+        and quality_verdict == "通过"
+        and quality_evaluator_ready
+        and not quality_related_error
+    )
+    if not metrics["independent_quality_pass"]:
+        add_issue(
+            issues,
+            "error" if level == "release" else "warning",
+            "tests.independent_quality_gate_required",
+            "必须完成独立 CASE-24 真实连续对话评估并达到全部质量门槛后才能启用；当前结果不足、过期或不是独立评估",
+            cases_path,
+            root,
+        )
+
     source_blocks = list(iter_source_blocks(sources_text)) if sources_text else []
     source_ids = [source_id for source_id, _ in source_blocks]
     source_count = len(source_ids)
@@ -2646,6 +2759,8 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     sources_path,
                     root,
                 )
+    composite_work_rows = list(iter_composite_work_blocks(sources_text)) if persona_type == "composite-character" else []
+    metrics["composite_work_count"] = len(composite_work_rows)
     if persona_asset_version >= 2:
         # The matrix is an evidence index, not merely a list of row names.
         # Validate each row so a copied table with eleven headings cannot make
@@ -2717,6 +2832,164 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         if any(owner[0] in verified_fidelity_card_ids for owner in owners)
     }
     metrics["unique_original_expressions"] = len(verified_unique_originals)
+    if persona_type == "composite-character":
+        work_card_owners: dict[str, str] = {}
+        work_card_counts: list[int] = []
+        work_evidence_counts: list[int] = []
+        work_dimension_counts: list[int] = []
+        work_gap_messages: list[str] = []
+        if len(composite_work_rows) < COMPOSITE_WORK_MIN_COUNT:
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "composite.work_matrix_missing",
+                f"跨角色集合必须明确列出至少 {COMPOSITE_WORK_MIN_COUNT} 部作品的 WORK 覆盖记录；当前只有 {len(composite_work_rows)} 条",
+                sources_path,
+                root,
+            )
+        for work_id, block in composite_work_rows:
+            work_name = field_value(block, "作品") or ""
+            speaker = field_value(block, "角色/表达者") or ""
+            raw_card_text = field_value(block, "原文卡") or ""
+            listed_card_ids = {
+                card_id.upper()
+                for card_id in re.findall(r"\b[A-Z0-9][A-Z0-9-]*-\d{4}\b", raw_card_text, re.IGNORECASE)
+            }
+            declared_unique = integer_field(block, "独特表达数")
+            declared_evidence = integer_field(block, "证据单元数")
+            scene_dimensions = split_values(field_value(block, "场景维度") or "")
+            source_strategy = field_value(block, "来源策略")
+            retrieval_gap = field_value(block, "检索缺口")
+            row_missing = [
+                field for field, value in (
+                    ("作品", work_name),
+                    ("角色/表达者", speaker),
+                    ("原文卡", raw_card_text),
+                    ("独特表达数", str(declared_unique) if declared_unique is not None else ""),
+                    ("证据单元数", str(declared_evidence) if declared_evidence is not None else ""),
+                    ("场景维度", field_value(block, "场景维度") or ""),
+                    ("来源策略", source_strategy or ""),
+                    ("检索缺口", retrieval_gap or ""),
+                ) if not has_substantive_value(value, allow_none=(field == "检索缺口"))
+            ]
+            if row_missing:
+                add_issue(
+                    issues,
+                    "error" if level == "release" else "warning",
+                    "composite.work_record_incomplete",
+                    f"{work_id}（{work_name or '未命名作品'}）缺少逐作品覆盖字段：" + ", ".join(row_missing),
+                    sources_path,
+                    root,
+                )
+                work_gap_messages.append(f"{work_id}:字段缺失")
+            verified_ids = listed_card_ids & verified_fidelity_card_ids
+            unknown_ids = sorted(listed_card_ids - set(all_ids))
+            if unknown_ids:
+                add_issue(
+                    issues,
+                    "error" if level == "release" else "warning",
+                    "composite.work_card_unknown",
+                    f"{work_id} 引用了不存在的原文卡：" + ", ".join(unknown_ids[:8]),
+                    sources_path,
+                    root,
+                )
+            unverified_ids = sorted(listed_card_ids & set(all_ids) - verified_fidelity_card_ids)
+            if unverified_ids:
+                add_issue(
+                    issues,
+                    "error" if level == "release" else "warning",
+                    "composite.work_card_not_verified",
+                    f"{work_id} 有 {len(unverified_ids)} 张卡尚未完成原语言与来源核验，不能计入逐作品覆盖："
+                    + ", ".join(unverified_ids[:8]),
+                    sources_path,
+                    root,
+                )
+            for card_id in listed_card_ids:
+                previous_work = work_card_owners.get(card_id)
+                if previous_work and previous_work != work_id:
+                    add_issue(
+                        issues,
+                        "error" if level == "release" else "warning",
+                        "composite.work_card_duplicate",
+                        f"原文卡 {card_id} 同时归入 {previous_work} 和 {work_id}；跨作品集合不能重复计数",
+                        sources_path,
+                        root,
+                    )
+                work_card_owners[card_id] = work_id
+            actual_unique = len({
+                normalize_original_text(field_value(card_blocks_by_id[card_id], "原文") or "")
+                for card_id in verified_ids
+                if card_id in card_blocks_by_id and has_exact_original_text(field_value(card_blocks_by_id[card_id], "原文"))
+            })
+            actual_evidence = len({card_scene_ids.get(card_id) for card_id in verified_ids if card_scene_ids.get(card_id)})
+            work_card_counts.append(len(verified_ids))
+            work_evidence_counts.append(actual_evidence)
+            work_dimension_counts.append(len(scene_dimensions))
+            if len(verified_ids) < COMPOSITE_WORK_MIN_CARDS:
+                add_issue(
+                    issues,
+                    "error" if level == "release" else "warning",
+                    "composite.work_cards_low",
+                    f"{work_id}（{work_name or '未命名作品'}）只有 {len(verified_ids)} 张已核验原文卡，单部作品至少需要 {COMPOSITE_WORK_MIN_CARDS} 张",
+                    sources_path,
+                    root,
+                )
+                work_gap_messages.append(f"{work_id}:原文卡 {len(verified_ids)}/{COMPOSITE_WORK_MIN_CARDS}")
+            if actual_unique < COMPOSITE_WORK_MIN_UNIQUE or (declared_unique is not None and declared_unique < COMPOSITE_WORK_MIN_UNIQUE):
+                add_issue(
+                    issues,
+                    "error" if level == "release" else "warning",
+                    "composite.work_unique_low",
+                    f"{work_id} 只有 {actual_unique} 条不同已核验表达，单部作品至少需要 {COMPOSITE_WORK_MIN_UNIQUE} 条",
+                    sources_path,
+                    root,
+                )
+            if actual_evidence < COMPOSITE_WORK_MIN_EVIDENCE_UNITS or (declared_evidence is not None and declared_evidence < COMPOSITE_WORK_MIN_EVIDENCE_UNITS):
+                add_issue(
+                    issues,
+                    "error" if level == "release" else "warning",
+                    "composite.work_evidence_low",
+                    f"{work_id} 只有 {actual_evidence} 个可由卡片回查的证据单元，单部作品至少需要 {COMPOSITE_WORK_MIN_EVIDENCE_UNITS} 个",
+                    sources_path,
+                    root,
+                )
+            if len(scene_dimensions) < COMPOSITE_WORK_MIN_SCENE_DIMENSIONS:
+                add_issue(
+                    issues,
+                    "error" if level == "release" else "warning",
+                    "composite.work_scene_coverage_low",
+                    f"{work_id} 只覆盖 {len(scene_dimensions)} 个场景维度，单部作品至少需要 {COMPOSITE_WORK_MIN_SCENE_DIMENSIONS} 个",
+                    sources_path,
+                    root,
+                )
+            if not source_strategy or not has_substantive_value(source_strategy):
+                add_issue(
+                    issues,
+                    "error" if level == "release" else "warning",
+                    "composite.work_source_strategy_missing",
+                    f"{work_id} 必须记录该作品的来源策略和版本层，不能只写作品名",
+                    sources_path,
+                    root,
+                )
+        total_matrix_cards = sum(work_card_counts)
+        max_share = max(work_card_counts) / max(total_matrix_cards, 1) if work_card_counts else 0.0
+        metrics["composite_work_cards_min"] = min(work_card_counts) if work_card_counts else 0
+        metrics["composite_work_evidence_min"] = min(work_evidence_counts) if work_evidence_counts else 0
+        metrics["composite_work_scene_dimensions_min"] = min(work_dimension_counts) if work_dimension_counts else 0
+        metrics["composite_work_card_share_max"] = round(max_share, 4)
+        if max_share > COMPOSITE_MAX_SINGLE_WORK_SHARE:
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                "composite.work_card_share_high",
+                f"单部作品占逐作品矩阵卡片的 {max_share:.0%}，不能超过 {COMPOSITE_MAX_SINGLE_WORK_SHARE:.0%}；否则会把集合人格收敛成单一作品",
+                sources_path,
+                root,
+            )
+        metrics["composite_work_gaps"] = work_gap_messages
+        metrics["composite_work_coverage_complete"] = not any(
+            issue.severity == "error" and issue.code.startswith("composite.") for issue in issues
+        )
     if (
         level == "release"
         and persona_type in {"existing-character", "composite-character", "real-person-simulation"}
@@ -3763,6 +4036,8 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 and len(subjective_memory_ids) >= 6
                 and quotation_policy_complete and verbosity_profile_complete
             ))
+            and metrics["independent_quality_pass"]
+            and (persona_type != "composite-character" or metrics["composite_work_coverage_complete"])
             and case_count >= 24
             and metrics["semantic_diversity_failures"] == 0
         )
@@ -3801,6 +4076,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 and len(subjective_memory_ids) >= 6
                 and quotation_policy_complete and verbosity_profile_complete
             ))
+            and metrics["independent_quality_pass"]
             and case_count >= 24
             and metrics["semantic_diversity_failures"] == 0
         )
@@ -3942,6 +4218,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
             f"level={result['level']} persona_type={metrics['persona_type']} "
             f"version={metrics['version']} research_status={metrics['research_status']} "
             f"coverage_path={metrics['coverage_path']} research_rounds={metrics['research_rounds']} "
+            f"candidate_expressions={metrics['research_candidates']} formal_expressions={metrics['research_formal']} "
+            f"pending_expressions={metrics['research_pending']} rejected_expressions={metrics['research_rejected']} "
             f"cards={metrics['cards']} exact_original_cards={metrics['exact_original_cards']} "
             f"performance_verified_cards={metrics['performance_verified_cards']} "
             f"distinct_evidence_units={metrics['distinct_evidence_units']} "
@@ -3965,6 +4243,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
             f"verbosity_profile_complete={metrics['verbosity_profile_complete']} "
             f"effect_matrix_rows={metrics['effect_matrix_rows']} "
             f"effect_matrix_complete={metrics['effect_matrix_complete']} "
+            f"composite_work_count={metrics['composite_work_count']} "
+            f"composite_work_coverage_complete={metrics['composite_work_coverage_complete']} "
+            f"composite_work_cards_min={metrics['composite_work_cards_min']} "
+            f"composite_work_card_share_max={metrics['composite_work_card_share_max']:.4f} "
+            f"composite_detected_work_counts={';'.join(metrics['composite_detected_work_counts']) or 'none'} "
+            f"independent_quality_pass={metrics['independent_quality_pass']} "
             f"character_presence_coverage={metrics['character_presence_coverage']} "
             f"semantic_diversity_failures={metrics['semantic_diversity_failures']} "
             f"emotion_modes={metrics['emotion_modes']} mode_dimensions={metrics['mode_dimensions']} "
@@ -3981,7 +4265,7 @@ def classify_loop_stage(error_codes: list[str]) -> tuple[str, str]:
     priorities = (
         (
             "RESEARCH",
-            ("research.", "sources.", "dialogue."),
+            ("research.", "sources.", "dialogue.", "composite."),
             "继续扩大或核验来源，修正原文卡、真实语境与调研轮次记录；完成后重新运行 iteration-gate。",
         ),
         (
@@ -4007,7 +4291,7 @@ def classify_loop_stage(error_codes: list[str]) -> tuple[str, str]:
 
 
 LOOP_STAGE_PREFIXES = {
-    "RESEARCH": ("research.", "sources.", "dialogue."),
+    "RESEARCH": ("research.", "sources.", "dialogue.", "composite."),
     "REDISTILL": ("core_rule.", "voice.", "micro.", "mode.", "anti.", "scene."),
     "TEST": ("tests.",),
     "GENERATE": ("persona.", "content.", "biography.", "openai.", "skill."),
@@ -4050,6 +4334,9 @@ def cmd_research_gate(args: argparse.Namespace) -> int:
         print("TERMINAL_ALLOWED=false")
         print("USER_REPORT_ALLOWED=false")
         print("LOOP_STAGE=RESEARCH")
+        print("PROGRESS_FEEDBACK_ALLOWED=true")
+        print("FEEDBACK_REQUIRED=true")
+        print("FEEDBACK_STAGE=资料采集")
         print(f"ACTIVE_STAGE_ERROR_COUNT={len(research_codes)}")
         print("ERROR_CODES=" + ",".join(research_codes[:20]))
         print(f"RESEARCH_PROFILE={metrics['research_profile']}")
@@ -4062,10 +4349,21 @@ def cmd_research_gate(args: argparse.Namespace) -> int:
         print(f"REQUIRED_EVIDENCE_UNITS={rich_targets['evidence_units']}")
         print(f"CURRENT_CONTEXT_COMPLETE_CARDS={metrics['context_complete_cards']}")
         print(f"CURRENT_SIGNATURE_CARDS={metrics['signature_cards']}")
+        print(f"CANDIDATE_EXPRESSIONS={metrics['research_candidates']}")
+        print(f"FORMAL_EXPRESSIONS={metrics['research_formal']}")
+        print(f"PENDING_EXPRESSIONS={metrics['research_pending']}")
+        print(f"REJECTED_EXPRESSIONS={metrics['research_rejected']}")
+        print(f"COMPOSITE_WORK_COUNT={metrics['composite_work_count']}")
+        print(f"COMPOSITE_WORK_COVERAGE_COMPLETE={str(metrics['composite_work_coverage_complete']).lower()}")
+        print(f"COMPOSITE_WORK_CARDS_MIN={metrics['composite_work_cards_min']}")
+        print(f"COMPOSITE_WORK_GAPS={';'.join(metrics['composite_work_gaps']) or 'none'}")
+        print("AUTO_DETECTED_WORKS=" + ";".join(metrics["composite_detected_work_counts"]))
         print(f"RESEARCH_ROUNDS={metrics['research_rounds']}")
         print(f"EXPANSION_ROUNDS={metrics['research_expansion_rounds']}")
+        print("RESEARCH_ROUND_SUMMARY=" + ";".join(metrics["research_round_summary"]))
         print("NEXT_ACTION=继续调研原始表达与完整语境；每轮必须扩大新的来源类别、站点、语言、版本、别名或场景范围。达到丰富档，或四轮实质扩展后有证据地标记已穷尽，再重跑 research-gate；此时禁止生成规则和测试。")
         print(f"RETRY_COMMAND=python scripts/persona_tool.py research-gate \"{root}\"")
+        print("NEXT_FEEDBACK=阶段：资料采集；已完成：本轮校验和缺口盘点；下一步：扩展新的作品/版本/站点/场景并完成核验，然后再次回报每轮数量。")
         return 1
 
     print("PERSONA_RESEARCH_STATE=READY")
@@ -4076,12 +4374,23 @@ def cmd_research_gate(args: argparse.Namespace) -> int:
     print("TERMINAL_ALLOWED=false")
     print("USER_REPORT_ALLOWED=false")
     print("LOOP_STAGE=REDISTILL")
+    print("PROGRESS_FEEDBACK_ALLOWED=true")
+    print("FEEDBACK_REQUIRED=true")
+    print("FEEDBACK_STAGE=资料采集")
     print(f"RESEARCH_PROFILE={metrics['research_profile']}")
     research_path = "exhausted" if metrics["research_status"] == "已穷尽" else "target-met"
     print(f"RESEARCH_PATH={research_path}")
     print(f"CURRENT_CARDS={metrics['cards']}")
     print(f"CURRENT_EVIDENCE_UNITS={metrics['distinct_evidence_units']}")
+    print(f"COMPOSITE_WORK_COUNT={metrics['composite_work_count']}")
+    print(f"COMPOSITE_WORK_COVERAGE_COMPLETE={str(metrics['composite_work_coverage_complete']).lower()}")
+    print(f"COMPOSITE_WORK_CARDS_MIN={metrics['composite_work_cards_min']}")
+    print(f"COMPOSITE_WORK_CARD_SHARE_MAX={metrics['composite_work_card_share_max']:.4f}")
+    print(f"COMPOSITE_WORK_GAPS={';'.join(metrics['composite_work_gaps']) or 'none'}")
+    print("AUTO_DETECTED_WORKS=" + ";".join(metrics["composite_detected_work_counts"]))
+    print("RESEARCH_ROUND_SUMMARY=" + ";".join(metrics["research_round_summary"]))
     print("NEXT_ACTION=资料闸门已通过；现在才从原文证据与真实语境蒸馏角色核心、声纹、微互动、情绪模式、反角色规则和工作迁移，然后运行 iteration-gate。")
+    print("NEXT_FEEDBACK=阶段：资料采集；已完成：逐作品覆盖和资料闸门通过；下一步：蒸馏规则、生成候选回答并进行真实对话测试。")
     return 0
 
 
@@ -4156,11 +4465,15 @@ def emit_gate(
         print("USER_REPORT_ALLOWED=false")
         print("FINAL_REPORT_ALLOWED=false")
         print("STATUS_REPLY_ALLOWED=true")
+        print("PROGRESS_FEEDBACK_ALLOWED=true")
+        print("FEEDBACK_REQUIRED=true")
+        print(f"FEEDBACK_STAGE={stage}")
         print(f"LOOP_STAGE={stage}")
         print(f"ACTIVE_STAGE_ERROR_COUNT={len(stage_codes)}")
         print(f"DEFERRED_ERROR_COUNT={len(deferred_codes)}")
         print("ERROR_CODES=" + ",".join(stage_codes[:20]))
         print(f"NEXT_ACTION={action}")
+        print(f"NEXT_FEEDBACK=阶段：{stage}；已完成：本轮门禁已定位 {len(stage_codes)} 个当前阶段问题；下一步：按上述动作修复并继续运行工具，不在此处结束创建。")
         if stage == "RESEARCH":
             print(f"STAGE_GATE_COMMAND=python scripts/persona_tool.py research-gate \"{root}\"")
         runtime_args = "" if runtime == "auto" else f" --runtime {runtime}"
@@ -4180,11 +4493,16 @@ def emit_gate(
         print("USER_REPORT_ALLOWED=false")
         print("FINAL_REPORT_ALLOWED=false")
         print("STATUS_REPLY_ALLOWED=true")
+        print("PROGRESS_FEEDBACK_ALLOWED=true")
+        print("FEEDBACK_REQUIRED=true")
+        print("FEEDBACK_STAGE=启用核对")
         print("LOOP_STAGE=ENABLE")
         if pending_paths is not None and not pending_paths.supports_persistent_activation:
             print("NEXT_ACTION=当前运行时只提供 Skill 级加载；运行 register 注册角色，再以 registered 重跑 completion-gate。")
+            print("NEXT_FEEDBACK=阶段：启用核对；已完成：正式校验通过；下一步：完成运行时注册并回读绑定回执。")
         else:
             print("NEXT_ACTION=按用户要求启用当前会话或持久作用域；完成后以 enabled 重新运行 completion-gate。")
+            print("NEXT_FEEDBACK=阶段：启用核对；已完成：正式校验通过；下一步：写入全局绑定并回读哈希回执。")
         return 1
 
     if activation_status in {"enabled", "registered"}:
@@ -4220,14 +4538,19 @@ def emit_gate(
             print("USER_REPORT_ALLOWED=false")
             print("FINAL_REPORT_ALLOWED=false")
             print("STATUS_REPLY_ALLOWED=true")
+            print("PROGRESS_FEEDBACK_ALLOWED=true")
+            print("FEEDBACK_REQUIRED=true")
+            print("FEEDBACK_STAGE=启用核对")
             print("LOOP_STAGE=ENABLE")
             error_code = "activation.receipt_invalid" if activation_status == "enabled" else "registration.invalid"
             print("ERROR_CODES=" + error_code)
             print("ACTIVATION_ERRORS=" + " | ".join(str(item) for item in verification["errors"]))
             if activation_status == "enabled":
                 print(f'NEXT_ACTION=重新运行 enable "{root}"，回读全局绑定并生成新回执，然后重跑 completion-gate。')
+                print("NEXT_FEEDBACK=阶段：启用核对；已完成：发现启用回执或绑定已过期；下一步：重新启用并核对实际文件哈希。")
             else:
                 print(f'NEXT_ACTION=重新运行 register "{root}"，核对角色路径与哈希，然后重跑 completion-gate。')
+                print("NEXT_FEEDBACK=阶段：启用核对；已完成：发现注册回执失效；下一步：重新注册并核对角色路径与哈希。")
             return 1
 
     print("PERSONA_BUILD_STATE=COMPLETE")
@@ -4238,6 +4561,9 @@ def emit_gate(
     print("USER_REPORT_ALLOWED=true")
     print("FINAL_REPORT_ALLOWED=true")
     print("STATUS_REPLY_ALLOWED=true")
+    print("PROGRESS_FEEDBACK_ALLOWED=false")
+    print("FEEDBACK_REQUIRED=false")
+    print("FEEDBACK_STAGE=完成")
     print("LOOP_STAGE=COMPLETE")
     print(f"ACTIVATION_STATUS={activation_status}")
     print(f"PERSONA_PATH={root}")
@@ -4326,6 +4652,15 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 def validate_for_activation(root: Path) -> dict[str, object]:
     validation = validate_skill(root, "release")
+    metrics = validation["metrics"]
+    if not metrics.get("independent_quality_pass"):
+        raise lifecycle.LifecycleError(
+            "独立质量门禁未通过：必须完成 CASE-24 真实连续对话独立评测并达到全部分项阈值后才能启用"
+        )
+    if metrics.get("persona_type") == "composite-character" and not metrics.get("composite_work_coverage_complete"):
+        raise lifecycle.LifecycleError(
+            "跨作品逐片覆盖门禁未通过：请补齐 WORK-逐作品代表性卡片、证据单元和场景维度后才能启用"
+        )
     if not validation["valid"]:
         codes = ",".join(unique_error_codes(validation)[:20])
         raise lifecycle.LifecycleError("角色未通过正式校验，不能启用；错误代码：%s" % codes)

@@ -43,7 +43,7 @@ def card_text(
     intents = ("encourage", "report", "warn", "comfort", "explain", "apologize", "clarify", "celebrate")
     task_state = task_states[(index - 1) % len(task_states)]
     risk = "high" if index % 10 == 0 else "low"
-    existing = persona_type in {"existing-character", "real-person-simulation"}
+    existing = persona_type in {"existing-character", "composite-character", "real-person-simulation"}
     source_type = (
         "本人公开表达" if persona_type == "real-person-simulation"
         else ("原作明确" if existing else "用户补充")
@@ -207,7 +207,7 @@ def build_fixture(
 
     cases_path = target / "references" / "07-验证用例.md"
     cases_text = cases_path.read_text(encoding="utf-8")
-    biography_case_last = 12 if persona_type in {"existing-character", "real-person-simulation"} else 8
+    biography_case_last = 12 if persona_type in {"existing-character", "composite-character", "real-person-simulation"} else 8
     runtime_sample_count = 20 if asset_version >= 2 else 12
     fidelity_cases = {
         "CASE-18": """## CASE-18 | 去名盲测
@@ -518,7 +518,7 @@ def build_fixture(
     cards = []
     index_rows = []
     for index in range(1, card_count + 1):
-        if persona_type in {"existing-character", "real-person-simulation"}:
+        if persona_type in {"existing-character", "composite-character", "real-person-simulation"}:
             source_id = f"SRC-{((index - 1) % 3) + 1:04d}"
         else:
             source_id = "SRC-0001"
@@ -543,7 +543,7 @@ def build_fixture(
     task_states = ("start", "progress", "waiting", "failed", "risk", "complete", "blocked", "issue")
     emotions = ("cheerful", "caring", "serious", "alert", "calm", "confident", "apologetic", "teasing")
     intents = ("encourage", "report", "warn", "comfort", "explain", "apologize", "clarify", "celebrate")
-    core_count = 12 if persona_type in {"existing-character", "real-person-simulation"} else 8
+    core_count = 12 if persona_type in {"existing-character", "composite-character", "real-person-simulation"} else 8
     core_layers = (
         "value", "judgment", "desire", "bias", "boundary", "behavior", "relationship",
         "emotion", "identity", "anti-core", "value", "judgment",
@@ -589,7 +589,7 @@ def build_fixture(
     core_text = re.sub(r"### CORE-01\s+\|.*?(?=\n## 与用户的关系)", "", core_text, flags=re.DOTALL)
     write_text(core_path, core_text + "\n" + "\n".join(core_entries))
 
-    voice_count = 12 if persona_type in {"existing-character", "real-person-simulation"} else 8
+    voice_count = 12 if persona_type in {"existing-character", "composite-character", "real-person-simulation"} else 8
     voice_layers = (
         "lexicon", "syntax", "ending", "orality", "interaction", "emotion", "relation",
         "translation", "anti-voice", "lexicon", "syntax", "interaction",
@@ -676,7 +676,7 @@ def build_fixture(
         "# 测试角色语言声纹\n\n" + "\n".join(voice_entries + micro_entries),
     )
 
-    mode_count = 12 if persona_type in {"existing-character", "real-person-simulation"} else 8
+    mode_count = 12 if persona_type in {"existing-character", "composite-character", "real-person-simulation"} else 8
     mode_emotions = ("cheerful", "caring", "serious", "alert", "calm", "confident", "apologetic", "teasing")
     mode_entries = []
     for index in range(1, mode_count + 1):
@@ -706,7 +706,7 @@ def build_fixture(
         )
     write_text(target / "references" / "03-情绪与关系.md", "# 测试角色情绪与关系\n\n" + "\n".join(mode_entries))
 
-    anti_count = 8 if persona_type in {"existing-character", "real-person-simulation"} else 6
+    anti_count = 8 if persona_type in {"existing-character", "composite-character", "real-person-simulation"} else 6
     anti_entries = []
     anti_modes = ("AI书面连接", "客服完整安抚", "项目经理任务分派", "机械三段式", "过度交还选择权", "伪口语填充", "单一情绪句型", "技术名词堆叠")
     anti_signals = ("综合来看 / 基于以上", "感谢理解 / 为你服务", "推进计划 / 确认范围", "首先 / 其次 / 最后", "由你决定 / 你来选择", "嗯嗯 / 搭档呀", "固定短反应 / 固定追问", "能力边界 / 流程闭环")
@@ -766,7 +766,7 @@ def build_fixture(
         )
     write_text(target / "references" / "04-工作场景迁移.md", "# 测试角色场景迁移\n\n" + "\n".join(scene_entries))
 
-    if persona_type == "existing-character":
+    if persona_type in {"existing-character", "composite-character"}:
         source_types = ("原作明确", "原作明确", "原作明确", "公开资料", "合理推导")
     elif persona_type == "real-person-simulation":
         source_types = ("本人公开表达", "本人公开表达", "本人公开表达", "公开资料", "公开资料")
@@ -783,7 +783,7 @@ def build_fixture(
 - 位置：测试来源 {index}
 - 原始媒介与版本：测试原声版本 {index}
 - 原始语言：zh-CN
-- 核验方式：{'原声比对' if persona_type in {'existing-character', 'real-person-simulation'} else '原创确认'}
+- 核验方式：{'原声比对' if persona_type in {'existing-character', 'composite-character', 'real-person-simulation'} else '原创确认'}
 - 可用范围：仅测试
 - 内容摘要：测试摘要
 - 可靠性：已核对
@@ -947,7 +947,7 @@ def build_fixture(
         "# 测试角色来源索引\n\n" + coverage + effect_matrix + "\n" + "\n".join(source_entries),
     )
 
-    bio_count = 12 if persona_type in {"existing-character", "real-person-simulation"} else 8
+    bio_count = 12 if persona_type in {"existing-character", "composite-character", "real-person-simulation"} else 8
     bio_categories = (
         "identity", "gender", "background", "timeline", "relationship", "ability", "preference", "worldview",
         "faq", "relationship", "timeline", "ability",
@@ -2862,6 +2862,80 @@ class PersonaToolTests(unittest.TestCase):
             result = persona_tool.validate_skill(role, "release")
             self.assertTrue(result["valid"], result["issues"])
 
+    def test_composite_character_requires_representative_per_work_matrix(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "composite-role"
+            build_fixture(role, "composite-character", 80, scene_count=24, signature_count=12, asset_version=2)
+            sources = role / "references" / "08-来源索引.md"
+            source_text = sources.read_text(encoding="utf-8")
+            source_text += "\n### WORK-01 | 作品一\n\n- 作品：作品一\n- 角色/表达者：角色一\n- 原文卡：TESTROLE-0001、TESTROLE-0002\n- 独特表达数：2\n- 证据单元数：1\n- 场景维度：日常、关系\n- 来源策略：primary 版本；原语言文本核验\n- 检索缺口：仍需补齐冲突与风险\n"
+            source_text += "\n### WORK-02 | 作品二\n\n- 作品：作品二\n- 角色/表达者：角色二\n- 原文卡：TESTROLE-0003、TESTROLE-0004\n- 独特表达数：2\n- 证据单元数：1\n- 场景维度：日常、关系\n- 来源策略：primary 版本；原语言文本核验\n- 检索缺口：仍需补齐冲突与风险\n"
+            write_text(sources, source_text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("composite.work_cards_low", codes)
+            self.assertIn("composite.work_evidence_low", codes)
+            self.assertIn("composite.work_scene_coverage_low", codes)
+            self.assertFalse(result["metrics"]["composite_work_coverage_complete"])
+
+    def test_composite_character_allows_weighted_classic_selection_when_each_work_has_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "weighted-composite-role"
+            build_fixture(role, "composite-character", 80, scene_count=24, signature_count=12, asset_version=2)
+            sources = role / "references" / "08-来源索引.md"
+            rows: list[str] = []
+            ranges = [(1, 10), (11, 25), (26, 45), (46, 80)]
+            for index, (start, end) in enumerate(ranges, start=1):
+                card_ids = "、".join(f"TESTROLE-{card:04d}" for card in range(start, end + 1))
+                rows.append(
+                    f"### WORK-{index:02d} | 作品{index}\n\n"
+                    f"- 作品：作品{index}\n- 角色/表达者：角色{index}\n- 原文卡：{card_ids}\n"
+                    "- 独特表达数：10\n- 证据单元数：10\n- 场景维度：日常、关系、冲突、风险\n"
+                    "- 来源策略：primary 版本；原语言文本核验\n- 检索缺口：无\n"
+                )
+            write_text(sources, sources.read_text(encoding="utf-8") + "\n" + "\n".join(rows))
+            result = persona_tool.validate_skill(role, "release")
+            self.assertTrue(result["metrics"]["composite_work_coverage_complete"], result["issues"])
+            self.assertEqual(result["metrics"]["composite_work_cards_min"], 10)
+            self.assertGreater(result["metrics"]["composite_work_card_share_max"], 0.4)
+            self.assertNotIn("composite.work_cards_low", {issue["code"] for issue in result["issues"]})
+            self.assertIn("tests.evaluation_persona_stale", {issue["code"] for issue in result["issues"]})
+
+    def test_independent_quality_gate_is_explicit_and_blocks_failed_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "quality-gated-role"
+            build_fixture(role, "existing-character", 80, scene_count=24, signature_count=12, asset_version=2)
+            cases = role / "references" / "07-验证用例.md"
+            text = cases.read_text(encoding="utf-8").replace("- 独立结论：通过", "- 独立结论：未通过", 1)
+            write_text(cases, text)
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertFalse(result["metrics"]["independent_quality_pass"])
+            self.assertIn("tests.quality_verdict_not_passed", codes)
+            self.assertIn("tests.independent_quality_gate_required", codes)
+
+    def test_research_gate_reports_collection_counts_and_feedback_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "feedback-role"
+            build_fixture(role, "composite-character", 28, scene_count=8, signature_count=8, asset_version=2)
+            completed = subprocess.run(
+                [sys.executable, str(ROOT / "scripts" / "persona_tool.py"), "research-gate", str(role)],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("CANDIDATE_EXPRESSIONS=", completed.stdout)
+            self.assertIn("FORMAL_EXPRESSIONS=", completed.stdout)
+            self.assertIn("PENDING_EXPRESSIONS=", completed.stdout)
+            self.assertIn("REJECTED_EXPRESSIONS=", completed.stdout)
+            self.assertIn("RESEARCH_ROUND_SUMMARY=", completed.stdout)
+            self.assertIn("COMPOSITE_WORK_GAPS=", completed.stdout)
+            self.assertIn("AUTO_DETECTED_WORKS=", completed.stdout)
+            self.assertIn("FEEDBACK_REQUIRED=true", completed.stdout)
+            self.assertIn("FEEDBACK_STAGE=资料采集", completed.stdout)
+            self.assertIn("NEXT_FEEDBACK=", completed.stdout)
+
     def test_creator_defaults_identity_prefix_and_formal_only_delivery(self) -> None:
         creator = (ROOT / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("创建角色的强制第一步", creator)
@@ -2877,6 +2951,9 @@ class PersonaToolTests(unittest.TestCase):
         self.assertIn("创建任务持续执行锁", creator)
         self.assertIn("禁止结束；立即继续下一项调研", creator)
         self.assertIn("进度消息不是交付，也不是暂停许可", creator)
+        self.assertIn("强制阶段反馈协议", creator)
+        self.assertIn("阶段 / 已完成 / 当前数量或发现 / 下一步", creator)
+        self.assertIn("逐作品代表性底线", creator)
         self.assertIn("不得把脚手架初始化", creator)
         self.assertIn("不能等待用户说“继续”", creator)
         self.assertIn("只是插入的状态问题，不会取消、暂停或替换原创建任务", creator)
