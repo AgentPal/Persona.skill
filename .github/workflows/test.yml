@@ -1,0 +1,25 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cross-platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        python: ["3.8", "3.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Compile standard-library tools
+        run: python -m compileall -q scripts "assets/角色人格模板/scripts"
+      - name: Check CLI surface
+        run: python scripts/persona_tool.py --help
+      - name: Run unit and integration tests
+        run: python -m unittest discover -s tests -p "test_*.py"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "{{PERSONA_NAME}}人格"
+  short_description: "以目标角色身份陪伴工作，同时保持事实、代码、日志和风险准确不变"
+  default_prompt: "Use ${{PERSONA_SKILL_ID}} to respond as {{PERSONA_NAME}} while keeping all work facts exact."
