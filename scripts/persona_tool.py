@@ -321,7 +321,95 @@ def card_prefix(slug: str) -> str:
     return value or "ROLE"
 
 
+def _clean_name(value: str | None) -> str:
+    return (value or "").strip()
+
+
+def cmd_name_gate(args: argparse.Namespace) -> int:
+    """Require an explicit two-choice display-name decision before creation.
+
+    The natural-language skill must show this gate as its first visible action.
+    Keeping the check in the deterministic tool also prevents ``init`` from
+    being used as an accidental bypass when an agent starts scaffolding first.
+    """
+    source_name = _clean_name(args.source_name)
+
+    if args.choice is None:
+        if not source_name:
+            if args.custom_name is not None:
+                display_name = _clean_name(args.custom_name)
+                if not display_name:
+                    print("错误：custom-name 不能为空。", file=sys.stderr)
+                    return 2
+                print("NAME_GATE_STATUS=accepted")
+                print("SOURCE_NAME=")
+                print(f"DISPLAY_NAME={display_name}")
+                print("NAME_CHOICE=none")
+                print("NAME_GATE_REQUIRED=false")
+                print("MUST_WAIT_FOR_NAME_CHOICE=false")
+                return 0
+            print("NAME_GATE_STATUS=awaiting-name")
+            print("当前创建请求没有指定人物名，创建前必须先设定人物名。")
+            print("请直接输入人物名：")
+            print("NAME_GATE_REQUIRED=true")
+            print("MUST_WAIT_FOR_NAME=true")
+            print("禁止在设定人物名之前联网、读取资料、初始化目录、蒸馏或生成角色。")
+            return 0
+        print("NAME_GATE_STATUS=awaiting-choice")
+        print(f"原角色名：{source_name}")
+        print("创建角色前必须先选择名称：")
+        print("1、直接使用原角色名")
+        print("2、自定义角色名（用户直接输入名字）")
+        print("NAME_GATE_REQUIRED=true")
+        print("MUST_WAIT_FOR_NAME_CHOICE=true")
+        print("禁止在选择前联网、读取资料、初始化目录、蒸馏或生成角色。")
+        return 0
+
+    if not source_name:
+        print("错误：没有原角色名时不使用 1/2 选择；请直接提供 custom-name。", file=sys.stderr)
+        return 2
+
+    if args.choice == "1":
+        if args.custom_name:
+            print("错误：选择 1 时不能同时提供 custom-name；请直接使用原角色名。", file=sys.stderr)
+            return 2
+        display_name = source_name
+    else:
+        display_name = _clean_name(args.custom_name)
+        if not display_name:
+            print("错误：选择 2 后必须提供 custom-name（用户直接输入名字）。", file=sys.stderr)
+            return 2
+
+    print("NAME_GATE_STATUS=accepted")
+    print(f"SOURCE_NAME={source_name}")
+    print(f"DISPLAY_NAME={display_name}")
+    print(f"NAME_CHOICE={args.choice}")
+    print("NAME_GATE_REQUIRED=false")
+    print("MUST_WAIT_FOR_NAME_CHOICE=false")
+    return 0
+
+
 def cmd_init(args: argparse.Namespace) -> int:
+    source_name = _clean_name(args.source_name)
+    selected_name = _clean_name(args.name)
+    if args.name_choice not in {"1", "2", "none"}:
+        print("错误：创建前必须先完成名称闸门：有原名时选择 1/2；没有原名时先设定人物名。请先运行 name-gate。", file=sys.stderr)
+        return 2
+    if args.name_choice in {"1", "2"} and not source_name:
+        print("错误：选择 1/2 时必须提供 source-name。", file=sys.stderr)
+        return 2
+    if args.name_choice == "1" and selected_name != source_name:
+        print("错误：name-choice=1 时，name 必须与 source-name 相同。", file=sys.stderr)
+        return 2
+    if args.name_choice == "2" and not selected_name:
+        print("错误：name-choice=2 时必须提供自定义 name。", file=sys.stderr)
+        return 2
+    if args.name_choice == "none" and source_name:
+        print("错误：没有指定人物名的流程不能填写 source-name；请直接设定 name。", file=sys.stderr)
+        return 2
+    if not selected_name:
+        print("错误：name 不能为空。", file=sys.stderr)
+        return 2
     if not SLUG_RE.fullmatch(args.slug) or len(args.slug) >= 64:
         print("错误：slug 只能包含小写字母、数字和单个连字符，且必须少于 64 字符。", file=sys.stderr)
         return 2
@@ -339,7 +427,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         print("错误：slug 缺少角色标识。", file=sys.stderr)
         return 2
     replacements = {
-        "{{PERSONA_NAME}}": args.name.strip(),
+        "{{PERSONA_NAME}}": selected_name,
         "{{PERSONA_SLUG}}": role_slug,
         "{{PERSONA_SKILL_ID}}": "persona-" + role_slug,
         "{{CARD_PREFIX}}": card_prefix(role_slug),
@@ -4368,8 +4456,29 @@ def build_parser() -> argparse.ArgumentParser:
             "--home", help="测试或隔离安装使用的用户 HOME；提供后忽略运行时配置目录环境变量",
         )
 
+    name_gate_parser = subparsers.add_parser(
+        "name-gate", help="创建前强制完成角色名称选择；不得绕过"
+    )
+    name_gate_parser.add_argument(
+        "--source-name", help="用户已经指定的原角色名；省略时进入只设定人物名的流程"
+    )
+    name_gate_parser.add_argument(
+        "--choice", choices=("1", "2"), help="有原角色名时：1 原名，2 自定义名"
+    )
+    name_gate_parser.add_argument(
+        "--custom-name", help="选择 2 或未指定原名时由用户直接输入的显示名"
+    )
+    name_gate_parser.set_defaults(func=cmd_name_gate)
+
     init_parser = subparsers.add_parser("init", help="从标准模板创建角色人格 Skill 工作目录")
-    init_parser.add_argument("--name", required=True, help="角色显示名")
+    init_parser.add_argument("--name", required=True, help="已通过名称闸门确认的角色显示名")
+    init_parser.add_argument(
+        "--source-name", help="用户指定的原角色名；name-choice=1/2 时必填"
+    )
+    init_parser.add_argument(
+        "--name-choice", choices=("1", "2", "none"),
+        help="名称闸门结果：1 原名，2 自定义名，none 表示请求未指定原名而直接设定人物名",
+    )
     init_parser.add_argument("--slug", required=True, help="小写连字符角色标识；persona- 前缀可省略")
     init_parser.add_argument("--output", required=True, help="要创建的目标目录；必须不存在")
     init_parser.set_defaults(func=cmd_init)

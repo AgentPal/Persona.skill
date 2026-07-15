@@ -1264,6 +1264,87 @@ class PersonaToolTests(unittest.TestCase):
             codes = {item["code"] for item in result["issues"]}
             self.assertIn("sources.effect_matrix_state_invalid", codes)
 
+    def test_name_gate_is_mandatory_and_supports_both_creation_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            no_name = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts" / "persona_tool.py"),
+                    "name-gate",
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(no_name.returncode, 0, no_name.stderr)
+            self.assertIn("NAME_GATE_STATUS=awaiting-name", no_name.stdout)
+            self.assertIn("请直接输入人物名", no_name.stdout)
+            self.assertNotIn("1、直接使用原角色名", no_name.stdout)
+
+            named = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts" / "persona_tool.py"),
+                    "name-gate", "--source-name", "锦木千束",
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(named.returncode, 0, named.stderr)
+            self.assertIn("NAME_GATE_STATUS=awaiting-choice", named.stdout)
+            self.assertIn("1、直接使用原角色名", named.stdout)
+            self.assertIn("2、自定义角色名（用户直接输入名字）", named.stdout)
+            self.assertIn("MUST_WAIT_FOR_NAME_CHOICE=true", named.stdout)
+
+            bypass = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts" / "persona_tool.py"), "init",
+                    "--name", "锦木千束", "--slug", "bypass", "--output", str(root / "bypass"),
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertNotEqual(bypass.returncode, 0)
+            self.assertIn("名称闸门", bypass.stderr)
+            self.assertFalse((root / "bypass").exists())
+
+            original = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts" / "persona_tool.py"), "name-gate",
+                    "--source-name", "锦木千束", "--choice", "1",
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(original.returncode, 0, original.stderr)
+            self.assertIn("DISPLAY_NAME=锦木千束", original.stdout)
+
+            custom = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts" / "persona_tool.py"), "name-gate",
+                    "--source-name", "锦木千束", "--choice", "2", "--custom-name", "小束",
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(custom.returncode, 0, custom.stderr)
+            self.assertIn("DISPLAY_NAME=小束", custom.stdout)
+
+            unnamed = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts" / "persona_tool.py"), "name-gate",
+                    "--custom-name", "新名字",
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(unnamed.returncode, 0, unnamed.stderr)
+            self.assertIn("NAME_GATE_STATUS=accepted", unnamed.stdout)
+            self.assertIn("NAME_CHOICE=none", unnamed.stdout)
+
+            unnamed_init = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts" / "persona_tool.py"), "init",
+                    "--name", "新名字", "--name-choice", "none",
+                    "--slug", "unnamed-role", "--output", str(root / "unnamed-role"),
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(unnamed_init.returncode, 0, unnamed_init.stderr)
+            self.assertIn("PERSONA_BUILD_STATE=INCOMPLETE", unnamed_init.stdout)
+
     def test_init_copies_selector_and_draft_validates(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "new-role"
@@ -1274,6 +1355,10 @@ class PersonaToolTests(unittest.TestCase):
                     "init",
                     "--name",
                     "新角色",
+                    "--source-name",
+                    "新角色",
+                    "--name-choice",
+                    "1",
                     "--slug",
                     "new-role",
                     "--output",
@@ -1307,7 +1392,8 @@ class PersonaToolTests(unittest.TestCase):
             init_result = subprocess.run(
                 [
                     sys.executable, str(ROOT / "scripts" / "persona_tool.py"), "init",
-                    "--name", "未完成角色", "--slug", "partial-role", "--output", str(partial),
+                    "--name", "未完成角色", "--source-name", "未完成角色", "--name-choice", "1",
+                    "--slug", "partial-role", "--output", str(partial),
                 ],
                 check=False, capture_output=True, text=True, encoding="utf-8",
             )
@@ -2766,9 +2852,12 @@ class PersonaToolTests(unittest.TestCase):
 
     def test_creator_defaults_identity_prefix_and_formal_only_delivery(self) -> None:
         creator = (ROOT / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("默认沿用来源角色或人物的原名", creator)
-        self.assertIn("只有身份或版本歧义、同名冲突", creator)
-        self.assertNotIn("第一条回复只能显示下面的二选一提示", creator)
+        self.assertIn("创建角色的强制第一步", creator)
+        self.assertIn("1、直接使用原角色名", creator)
+        self.assertIn("2、自定义角色名（用户直接输入名字）", creator)
+        self.assertIn("没有指定人物名", creator)
+        self.assertIn("禁止先联网、读取资料、调用 `init`", creator)
+        self.assertIn("默认沿用原角色名和当前主要版本只表示用户选择了 `1`", creator)
         self.assertIn("创建过程中的所有 Agent 自然语言消息都必须以 `<角色名>：` 开头", creator)
         self.assertIn("普通问候、闲聊和可立即回答的问题只发送最终回答", creator)
         self.assertIn("默认静默完成角色核心读取", creator)
