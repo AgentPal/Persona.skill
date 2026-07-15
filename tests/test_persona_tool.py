@@ -476,7 +476,7 @@ def build_fixture(
                 "prompt": sample["prompt"],
                 "response": sample["response"],
                 "verdict": "pass",
-                "reason": f"独立评估第 {index} 条的角色还原、连续性、口语、形态和事实风险。",
+                "reason": f"独立评估第 {index} 条围绕“{sample['prompt']}”检查角色还原、连续性、口语、形态和事实风险。",
             }
         )
 
@@ -1833,20 +1833,18 @@ class PersonaToolTests(unittest.TestCase):
             self.assertFalse(result["valid"])
             self.assertIn("research.not_saturated", codes)
 
-    def test_exhausted_research_releases_all_available_material(self) -> None:
+    def test_exhausted_research_cannot_release_below_rich_floor(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             role = Path(temporary) / "exhausted-role"
             build_fixture(role, "existing-character", 12, 4, 3, research_status="已穷尽")
             result = persona_tool.validate_skill(role, "release")
-            self.assertTrue(result["valid"], result["issues"])
+            self.assertFalse(result["valid"], result["issues"])
             self.assertEqual(result["metrics"]["version"], "正式版")
             self.assertEqual(result["metrics"]["research_status"], "已穷尽")
             self.assertEqual(result["metrics"]["coverage_path"], "exhausted")
-            warning_codes = {
-                issue["code"] for issue in result["issues"] if issue["severity"] == "warning"
-            }
-            self.assertIn("dialogue.too_few", warning_codes)
-            self.assertIn("dialogue.exact_original_cards_low", warning_codes)
+            error_codes = {issue["code"] for issue in result["issues"] if issue["severity"] == "error"}
+            self.assertIn("research.rich_profile_required", error_codes)
+            self.assertIn("research.rich_cards_required", error_codes)
 
     def test_exhausted_status_requires_real_expansion_record(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -2915,6 +2913,35 @@ class PersonaToolTests(unittest.TestCase):
             self.assertFalse(result["metrics"]["independent_quality_pass"])
             self.assertIn("tests.quality_verdict_not_passed", codes)
             self.assertIn("tests.independent_quality_gate_required", codes)
+
+    def test_rich_quality_gate_rejects_labelled_repeated_continuity_samples(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "labelled-quality-role"
+            build_fixture(role, "existing-character", 80, scene_count=24, signature_count=12, asset_version=2)
+            runtime_path = role / "tests" / "runtime-conversation.json"
+            payload = json.loads(runtime_path.read_text(encoding="utf-8"))
+            for item in payload:
+                item["prompt"] = "risk"
+                item["response"] = "测试角色：这就开干。"
+            write_text(runtime_path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("tests.runtime_prompt_not_natural", codes)
+            self.assertIn("tests.runtime_prompt_diversity_low", codes)
+            self.assertIn("tests.runtime_mechanical_repetition", codes)
+            self.assertFalse(result["metrics"]["independent_quality_pass"])
+
+    def test_independent_report_not_passed_cannot_coexist_with_case24_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "contradictory-quality-role"
+            build_fixture(role, "existing-character", 80, scene_count=24, signature_count=12, asset_version=2)
+            write_text(role / "tests" / "independent-evaluation.md", "# 独立评测\n\n最终结论：不通过，证据不足。\n")
+            result = persona_tool.validate_skill(role, "release")
+            codes = {issue["code"] for issue in result["issues"]}
+            self.assertFalse(result["valid"])
+            self.assertIn("tests.independent_report_not_passed", codes)
+            self.assertFalse(result["metrics"]["independent_quality_pass"])
 
     def test_research_gate_reports_collection_counts_and_feedback_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

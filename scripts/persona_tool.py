@@ -220,7 +220,9 @@ REQUIRED_BIO_BASELINE_FIELDS = (
 # Existing people and characters differ greatly in how much source material is
 # reasonably available.  "丰富" is the only normal successful target for an
 # existing character or real person.  Lower profiles describe work in progress
-# and may release only through a genuinely exhausted, multi-scope search path.
+# and are never eligible for activation: a role may be reported as exhausted
+# for audit purposes, but the user-facing Skill must still reach the rich corpus
+# floor before it can be distilled, enabled, or presented as complete.
 RESEARCH_PROFILES = {
     "丰富": {
         "cards": 80, "unique": 60, "evidence_units": 24, "signature": 12,
@@ -235,6 +237,9 @@ RESEARCH_PROFILES = {
         "dimensions": 6, "sources": 1, "primary_sources": 1, "rounds": 2,
     },
 }
+RICH_CORPUS_MIN_CARDS = 80
+RICH_CORPUS_RECOMMENDED_MAX_CARDS = 300
+RICH_CORPUS_TYPES = {"existing-character", "composite-character", "real-person-simulation"}
 REQUIRED_RESEARCH_AUDIT_FIELDS = (
     "资料丰度判定依据", "资料丰度边界说明", "候选表达数", "正式原文卡数", "待核验表达数", "排除表达数",
     "排除原因摘要", "覆盖维度", "最近两轮新增率", "饱和结论",
@@ -913,6 +918,40 @@ def read_runtime_samples(path: Path) -> list[dict[str, str]]:
     return result
 
 
+def is_label_like_prompt(value: str) -> bool:
+    """Reject test labels that cannot establish a real user situation."""
+    text = re.sub(r"\s+", " ", value.strip())
+    if not text:
+        return True
+    # A single ASCII token (hello, risk, pause, CASE-01, ...) is a fixture
+    # label, not a natural-language turn.  Real English requests contain
+    # multiple words or punctuation/context; Chinese prompts are checked by
+    # the minimum substantive length below.
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{1,40}", text):
+        return True
+    compact = re.sub(r"[\W_]", "", text, flags=re.UNICODE)
+    return len(compact) < 4
+
+
+def normalized_evaluation_reason(value: str) -> str:
+    text = re.sub(r"ITEM[-_]?\d+|第\s*\d+\s*条?", "", value.casefold())
+    text = re.sub(r"(?:样本|话轮|评估|检查器|记录)\s*\d+", "", text)
+    text = re.sub(r"\d+", "", text)
+    text = re.sub(r"\s+", "", text)
+    return text.strip()
+
+
+def response_fragments(value: str) -> list[str]:
+    """Return substantive sentence fragments for mechanical-repetition checks."""
+    text = re.sub(r"^[^：:]{1,40}[：:]", "", value.strip())
+    fragments = []
+    for part in re.split(r"[。！？!?；;\n]+", text):
+        normalized = re.sub(r"\s+", "", part).strip("，,、:：\"'“”‘’")
+        if len(normalized) >= 4:
+            fragments.append(normalized.casefold())
+    return fragments
+
+
 def resolve_record_path(root: Path, value: str | None) -> Path | None:
     if not has_substantive_value(value):
         return None
@@ -1018,6 +1057,8 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         "research_pending": 0,
         "research_rejected": 0,
         "research_round_summary": [],
+        "rich_corpus_ready": False,
+        "rich_corpus_recommended_max_cards": RICH_CORPUS_RECOMMENDED_MAX_CARDS,
         "cards": 0,
         "exact_original_cards": 0,
         "performance_verified_cards": 0,
@@ -1065,6 +1106,12 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         "composite_work_gaps": [],
         "composite_detected_work_counts": [],
         "independent_quality_pass": False,
+        "runtime_prompt_count": 0,
+        "runtime_prompt_natural_count": 0,
+        "runtime_prompt_unique_ratio": 0.0,
+        "runtime_repeated_fragment_max": 0,
+        "evaluation_reason_unique_ratio": 0.0,
+        "independent_report_consistent": True,
         "semantic_diversity_failures": 0,
         "rule_evidence_mappings": 0,
     }
@@ -2368,6 +2415,32 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     "CASE-19 必须逐项包含至少一个非通用助手的相似角色对照：" + ", ".join(missing_similar),
                     record_path, root,
                 )
+            for field, label in (("generic_response", "通用助手回答"), ("similar_response", "相似角色回答")):
+                values = [str(item.get(field, "")).strip() for _, item in items if str(item.get(field, "")).strip()]
+                counts = Counter(values)
+                if values and max(counts.values()) > max(3, int(len(values) * 0.3 + 0.999)):
+                    add_issue(
+                        issues, "error" if level == "release" else "warning",
+                        "tests.contrast_response_repeated",
+                        f"CASE-19 的{label}过度重复；需要逐项生成真实对照回答，而不是复制同一句",
+                        record_path, root,
+                    )
+        if case_id == "CASE-20":
+            mapping_signatures = []
+            for _, item in items:
+                evidence = str(item.get("evidence", ""))
+                rules = tuple(sorted(set(re.findall(r"\b(?:CORE|VOICE|MIND|EXPR|MODE|ANTI)-\d{2}\b", evidence, re.IGNORECASE))))
+                if rules:
+                    mapping_signatures.append(rules)
+            if mapping_signatures:
+                counts = Counter(mapping_signatures)
+                if max(counts.values()) > max(3, int(len(mapping_signatures) * 0.3 + 0.999)):
+                    add_issue(
+                        issues, "error" if level == "release" else "warning",
+                        "tests.trace_mapping_repeated",
+                        "CASE-20 的证据映射反复指向同一组 CORE/VOICE/MIND/EXPR 规则；必须逐项对应实际召回与原文证据",
+                        record_path, root,
+                    )
         if case_id == "CASE-24":
             failed_quality_items = [
                 item_id for item_id, item in items if str(item.get("verdict", "")).lower() != "pass"
@@ -2387,6 +2460,47 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 record_path, root,
             )
 
+    # A score sheet with twenty copies of one explanation is not an
+    # independent evaluation.  Keep this deterministic: evaluators may use a
+    # common rubric, but each item must state a different, item-specific reason.
+    evaluation_reason_values = [
+        normalized_evaluation_reason(str(item.get("reason", "")))
+        for case_id in ("CASE-18", "CASE-19", "CASE-20", "CASE-24")
+        for _, item in parsed_record_items.get(case_id, [])
+        if str(item.get("reason", "")).strip()
+    ]
+    if evaluation_reason_values:
+        reason_counts = Counter(evaluation_reason_values)
+        metrics["evaluation_reason_unique_ratio"] = round(
+            len(set(evaluation_reason_values)) / len(evaluation_reason_values), 4
+        )
+        reason_limit = max(2, int(len(evaluation_reason_values) * 0.3 + 0.999))
+        repeated_reasons = [
+            (reason, count) for reason, count in reason_counts.items() if count > reason_limit
+        ]
+        if repeated_reasons:
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "tests.evaluation_reason_repeated",
+                f"独立评测理由过度模板化；同一理由最多只能覆盖 30% 样本，当前最高重复 {max(count for _, count in repeated_reasons)} 条",
+                resolved_record_paths.get("CASE-24") or cases_path, root,
+            )
+
+    independent_report_path = root / "tests" / "independent-evaluation.md"
+    if independent_report_path.is_file():
+        report_text = read_text(independent_report_path)
+        conclusion_match = re.search(r"最终结论[：:]?(.*?)(?=^##\s|\Z)", report_text, re.MULTILINE | re.DOTALL)
+        conclusion_text = conclusion_match.group(1) if conclusion_match else report_text[:800]
+        report_not_passed = bool(re.search(r"不通过|NOT\s*PASS|证据不足|仍不能|未通过", conclusion_text, re.IGNORECASE))
+        metrics["independent_report_consistent"] = not report_not_passed
+        if report_not_passed and quality_verdict == "通过":
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "tests.independent_report_not_passed",
+                "独立评测报告仍明确写着不通过或证据不足，不能与 CASE-24 的“通过”结论并存",
+                independent_report_path, root,
+            )
+
     batch_input_path = resolve_record_path(root, field_value(case_blocks.get("CASE-23", ""), "批量输入位置"))
     quality_input_path = resolve_record_path(root, field_value(case_blocks.get("CASE-24", ""), "对话数据位置"))
     batch_output_path = resolve_record_path(root, field_value(case_blocks.get("CASE-23", ""), "检查输出位置"))
@@ -2398,6 +2512,59 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         )
     else:
         runtime_samples = read_runtime_samples(batch_input_path)
+        metrics["runtime_prompt_count"] = len(runtime_samples)
+        natural_prompts = [sample["prompt"] for sample in runtime_samples if not is_label_like_prompt(sample["prompt"])]
+        metrics["runtime_prompt_natural_count"] = len(natural_prompts)
+        metrics["runtime_prompt_unique_ratio"] = round(
+            len({re.sub(r"\s+", "", prompt).casefold() for prompt in natural_prompts}) / max(len(runtime_samples), 1),
+            4,
+        )
+        fragment_counts = Counter(
+            fragment
+            for sample in runtime_samples
+            for fragment in response_fragments(sample["response"])
+        )
+        metrics["runtime_repeated_fragment_max"] = max(fragment_counts.values(), default=0)
+        natural_required = max(1, int(len(runtime_samples) * 0.8))
+        if len(natural_prompts) < natural_required:
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "tests.runtime_prompt_not_natural",
+                f"真实连续对话中只有 {len(natural_prompts)}/{len(runtime_samples)} 条是自然语言场景；至少需要 80%，不能用 hello/risk/pause 这类标签冒充用户话轮",
+                batch_input_path, root,
+            )
+        unique_prompt_count = len({re.sub(r"\s+", "", sample["prompt"]).casefold() for sample in runtime_samples})
+        if runtime_samples and unique_prompt_count / len(runtime_samples) < 0.8:
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "tests.runtime_prompt_diversity_low",
+                "真实连续对话的用户话轮重复度过高；至少 80% 的 prompt 必须是不同且有语境的请求",
+                batch_input_path, root,
+            )
+        repetition_limit = max(3, int(len(runtime_samples) * 0.25 + 0.999))
+        repeated_fragments = [
+            (fragment, count) for fragment, count in fragment_counts.items()
+            if count > repetition_limit
+        ]
+        if repeated_fragments:
+            preview = "、".join(f"{fragment}×{count}" for fragment, count in sorted(repeated_fragments, key=lambda item: -item[1])[:3])
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "tests.runtime_mechanical_repetition",
+                f"连续对话出现机械重复表达（{preview}）；同一完整片段不得超过样本的 25%",
+                batch_input_path, root,
+            )
+        pause_samples = [
+            sample for sample in runtime_samples
+            if re.search(r"暂停人格|停止人格|别演|不要角色化|\bpause\b|\bstop persona\b", sample["prompt"], re.IGNORECASE)
+        ]
+        if skill_prefix and any(sample["response"].lstrip().startswith(skill_prefix) for sample in pause_samples):
+            add_issue(
+                issues, "error" if level == "release" else "warning",
+                "tests.persona_pause_prefix_violation",
+                "用户明确暂停人格时，真实对话仍带角色前缀；暂停行为必须由实际回答证明，不能只在规则文件里声明",
+                batch_input_path, root,
+            )
         if len(runtime_samples) != batch_samples:
             add_issue(
                 issues, "error" if level == "release" else "warning", "tests.batch_input_count_mismatch",
@@ -2684,6 +2851,10 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
             or issue.code in {
                 "tests.evaluator_type_invalid", "tests.self_evaluation_forbidden", "tests.evaluator_pending",
                 "tests.runtime_dataset_mismatch", "tests.quality_record_stale", "tests.runtime_item_mismatch",
+                "tests.runtime_prompt_not_natural", "tests.runtime_prompt_diversity_low",
+                "tests.runtime_mechanical_repetition", "tests.persona_pause_prefix_violation",
+                "tests.evaluation_reason_repeated", "tests.independent_report_not_passed",
+                "tests.contrast_response_repeated", "tests.trace_mapping_repeated",
             }
         )
         for issue in issues
@@ -2832,6 +3003,37 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         if any(owner[0] in verified_fidelity_card_ids for owner in owners)
     }
     metrics["unique_original_expressions"] = len(verified_unique_originals)
+    if persona_type in RICH_CORPUS_TYPES:
+        rich_profile_ready = research_profile == "丰富"
+        rich_card_floor_ready = len(verified_fidelity_card_ids) >= RICH_CORPUS_MIN_CARDS
+        metrics["rich_corpus_ready"] = bool(rich_profile_ready and rich_card_floor_ready)
+        if level == "release" and not rich_profile_ready:
+            add_issue(
+                issues,
+                "error",
+                "research.rich_profile_required",
+                "已有角色、跨作品角色集合和现实人物模拟必须达到“丰富”资料档；“一般/稀缺/已穷尽”只能作为调研审计状态，不能进入蒸馏、启用或完成交付",
+                sources_path,
+                root,
+            )
+        if level == "release" and not rich_card_floor_ready:
+            add_issue(
+                issues,
+                "error",
+                "research.rich_cards_required",
+                f"正式原文卡仅 {len(verified_fidelity_card_ids)} 张；角色资料必须至少有 {RICH_CORPUS_MIN_CARDS} 张经原语言、来源和语境核验的代表性原文卡后才能继续",
+                root / "references" / "06-对白库.md",
+                root,
+            )
+        if len(verified_fidelity_card_ids) > RICH_CORPUS_RECOMMENDED_MAX_CARDS:
+            add_issue(
+                issues,
+                "warning",
+                "dialogue.rich_cards_over_recommended",
+                f"正式原文卡 {len(verified_fidelity_card_ids)} 张已超过建议的 {RICH_CORPUS_RECOMMENDED_MAX_CARDS} 张；请继续去重并优先保留跨情绪、关系和工作场景的代表性经典表达",
+                root / "references" / "06-对白库.md",
+                root,
+            )
     if persona_type == "composite-character":
         work_card_owners: dict[str, str] = {}
         work_card_counts: list[int] = []
@@ -4221,6 +4423,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             f"candidate_expressions={metrics['research_candidates']} formal_expressions={metrics['research_formal']} "
             f"pending_expressions={metrics['research_pending']} rejected_expressions={metrics['research_rejected']} "
             f"cards={metrics['cards']} exact_original_cards={metrics['exact_original_cards']} "
+            f"rich_corpus_ready={metrics['rich_corpus_ready']} recommended_max_cards={metrics['rich_corpus_recommended_max_cards']} "
             f"performance_verified_cards={metrics['performance_verified_cards']} "
             f"distinct_evidence_units={metrics['distinct_evidence_units']} "
             f"context_complete_cards={metrics['context_complete_cards']} "
@@ -4249,6 +4452,9 @@ def cmd_validate(args: argparse.Namespace) -> int:
             f"composite_work_card_share_max={metrics['composite_work_card_share_max']:.4f} "
             f"composite_detected_work_counts={';'.join(metrics['composite_detected_work_counts']) or 'none'} "
             f"independent_quality_pass={metrics['independent_quality_pass']} "
+            f"runtime_prompt_natural={metrics['runtime_prompt_natural_count']}/{metrics['runtime_prompt_count']} "
+            f"runtime_repeated_fragment_max={metrics['runtime_repeated_fragment_max']} "
+            f"evaluation_reason_unique_ratio={metrics['evaluation_reason_unique_ratio']} "
             f"character_presence_coverage={metrics['character_presence_coverage']} "
             f"semantic_diversity_failures={metrics['semantic_diversity_failures']} "
             f"emotion_modes={metrics['emotion_modes']} mode_dimensions={metrics['mode_dimensions']} "
@@ -4343,6 +4549,8 @@ def cmd_research_gate(args: argparse.Namespace) -> int:
         print(f"RESEARCH_STATUS={metrics['research_status']}")
         print(f"CURRENT_CARDS={metrics['cards']}")
         print(f"REQUIRED_CARDS={rich_targets['cards']}")
+        print(f"RICH_CORPUS_READY={str(metrics['rich_corpus_ready']).lower()}")
+        print(f"RECOMMENDED_MAX_CARDS={metrics['rich_corpus_recommended_max_cards']}")
         print(f"CURRENT_UNIQUE_EXPRESSIONS={metrics['unique_original_expressions']}")
         print(f"REQUIRED_UNIQUE_EXPRESSIONS={rich_targets['unique']}")
         print(f"CURRENT_EVIDENCE_UNITS={metrics['distinct_evidence_units']}")
@@ -4361,7 +4569,7 @@ def cmd_research_gate(args: argparse.Namespace) -> int:
         print(f"RESEARCH_ROUNDS={metrics['research_rounds']}")
         print(f"EXPANSION_ROUNDS={metrics['research_expansion_rounds']}")
         print("RESEARCH_ROUND_SUMMARY=" + ";".join(metrics["research_round_summary"]))
-        print("NEXT_ACTION=继续调研原始表达与完整语境；每轮必须扩大新的来源类别、站点、语言、版本、别名或场景范围。达到丰富档，或四轮实质扩展后有证据地标记已穷尽，再重跑 research-gate；此时禁止生成规则和测试。")
+        print("NEXT_ACTION=继续调研原始表达与完整语境；每轮必须扩大新的来源类别、站点、语言、版本、别名或场景范围。已有角色类必须达到至少 80 张已核验卡和丰富档后才能重跑 research-gate 进入蒸馏；已穷尽只能记录缺口，不能放行。")
         print(f"RETRY_COMMAND=python scripts/persona_tool.py research-gate \"{root}\"")
         print("NEXT_FEEDBACK=阶段：资料采集；已完成：本轮校验和缺口盘点；下一步：扩展新的作品/版本/站点/场景并完成核验，然后再次回报每轮数量。")
         return 1
@@ -4381,6 +4589,8 @@ def cmd_research_gate(args: argparse.Namespace) -> int:
     research_path = "exhausted" if metrics["research_status"] == "已穷尽" else "target-met"
     print(f"RESEARCH_PATH={research_path}")
     print(f"CURRENT_CARDS={metrics['cards']}")
+    print(f"RICH_CORPUS_READY={str(metrics['rich_corpus_ready']).lower()}")
+    print(f"RECOMMENDED_MAX_CARDS={metrics['rich_corpus_recommended_max_cards']}")
     print(f"CURRENT_EVIDENCE_UNITS={metrics['distinct_evidence_units']}")
     print(f"COMPOSITE_WORK_COUNT={metrics['composite_work_count']}")
     print(f"COMPOSITE_WORK_COVERAGE_COMPLETE={str(metrics['composite_work_coverage_complete']).lower()}")
@@ -4653,6 +4863,10 @@ def cmd_status(args: argparse.Namespace) -> int:
 def validate_for_activation(root: Path) -> dict[str, object]:
     validation = validate_skill(root, "release")
     metrics = validation["metrics"]
+    if metrics.get("persona_type") in RICH_CORPUS_TYPES and not metrics.get("rich_corpus_ready"):
+        raise lifecycle.LifecycleError(
+            f"资料丰度门禁未通过：已有角色类 Skill 必须先收集至少 {RICH_CORPUS_MIN_CARDS} 张已核验代表性原文卡并达到“丰富”档；当前为 {metrics.get('exact_original_cards', 0)} 张、{metrics.get('research_profile', 'unknown')}"
+        )
     if not metrics.get("independent_quality_pass"):
         raise lifecycle.LifecycleError(
             "独立质量门禁未通过：必须完成 CASE-24 真实连续对话独立评测并达到全部分项阈值后才能启用"
