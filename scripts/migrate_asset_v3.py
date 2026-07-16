@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Mechanically scaffold Persona asset v3 without inventing character behavior.
+"""Mechanically scaffold Persona asset v3 plus the current v4 quality contract.
 
 The command upgrades v1 through the existing v2 structural migration, adds the
 BEHAV template, synchronizes runtime scripts, and marks the role as v3.  The
 result is intentionally incomplete until evidence-backed BEHAV rules and a new
-Persona Quality Loop v3 run pass release validation.
+Persona Quality Loop v4 run pass release validation.
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ def migrate(role_root: Path, template_root: Path, sync_assets: bool = True) -> d
         "previous_asset_version": current,
         "asset_version": 3,
         "migration_state": "INCOMPLETE",
-        "next_action": "按原始证据重蒸馏至少 12 条 BEHAV，覆盖全部行为功能，然后运行 quality-init/record/evaluate；禁止把模板骨架当作通过。",
+        "next_action": "按原始证据重蒸馏至少 12 条 BEHAV，补齐反直觉切入、人物推理次序、顾问骨架禁用和去名识别锚点；随后运行 v4 quality-init/record/evaluate。禁止把模板骨架或通用顾问回答当作通过。",
     }
 
 

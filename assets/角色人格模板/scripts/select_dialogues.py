@@ -725,6 +725,10 @@ def behavior_contract(rules: Dict[str, List[Dict[str, object]]], query: Dict[str
             "relationship_action": field_value(block, "对用户的关系动作"),
             "emotion_trajectory": field_value(block, "情绪轨迹"),
             "speech_act_sequence": field_value(block, "话语动作序列"),
+            "counterintuitive_entry": field_value(block, "反直觉切入"),
+            "reasoning_order": field_value(block, "人物推理次序"),
+            "generic_skeleton_ban": field_value(block, "顾问骨架禁用"),
+            "identity_anchor": field_value(block, "去名识别锚点"),
             "candidate_shapes": sorted(split_values(field_value(block, "形状候选"))),
             "visible_character_signals": sorted(split_values(field_value(block, "可见角色信号"))),
             "minimum_realization": field_value(block, "最小实现"),
@@ -744,9 +748,13 @@ def behavior_contract(rules: Dict[str, List[Dict[str, object]]], query: Dict[str
         and len(primary.get("visible_character_signals", [])) >= 2
         and primary.get("generic_near_miss")
         and primary.get("similar_role_boundary")
+        and primary.get("counterintuitive_entry")
+        and primary.get("reasoning_order")
+        and primary.get("generic_skeleton_ban")
+        and primary.get("identity_anchor")
     )
     return {
-        "contract_version": 3,
+        "contract_version": 4,
         "ready": ready,
         "behavior_function": query.get("behavior_function", ""),
         "behavior_rule_ids": [item["rule_id"] for item in contracts],
@@ -754,13 +762,17 @@ def behavior_contract(rules: Dict[str, List[Dict[str, object]]], query: Dict[str
         "required_visible_slots": [
             "至少一个人物判断、情绪、关系或主动性片段",
             "至少一个修辞、节奏或背景联想片段",
+            "至少两个可见人物推理动作，且其中一个是取舍、关系、反转或联想",
         ],
         "generation_trace_contract": {
-            "contract_version": 3,
+            "contract_version": 4,
             "behavior_rule_ids": "必须引用真实 BEHAV-编号",
             "visible_character_signals": "至少两项；每项含 kind/rule_id/excerpt，excerpt 逐字存在于实际回复",
             "generic_near_miss_avoided": "说明本回答如何避开命中的通用助手近失样本",
             "similar_role_boundary": "说明本回答采用了哪一条目标人物区别性边界",
+            "reasoning_order_realized": "说明人物推理次序如何在这条回答中实现",
+            "generic_skeleton_avoided": "点明避开的具体顾问/项目经理骨架，不能只写‘没有通用腔’",
+            "thinking_moves": "至少两项；每项含 kind/rule_id/excerpt，excerpt 逐字存在于实际回复",
         },
         "failure_rule": "没有 ready 的行为合同，或无法在回答中实现两个可见槽位时，generation_readiness 必须为 low",
     }

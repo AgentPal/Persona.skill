@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic evidence chain for Persona Quality Loop v3.
+"""Deterministic evidence chain for Persona Quality Loop v4.
 
 The module does not judge character likeness itself.  It freezes the persona,
 draws post-freeze prompts, verifies that a real runtime response set implements
@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, MutableMapping, Optional, Sequence, Tuple
 
 
-CONTRACT_VERSION = 3
+CONTRACT_VERSION = 4
 MIN_PROMPTS = 24
 MIN_BLIND_PASSES = 20
 MIN_SIMILAR_PASSES = 20
@@ -36,6 +36,9 @@ ALLOWED_FAILURE_LAYERS = {
 }
 ALLOWED_SIGNAL_KINDS = {
     "judgment", "emotion", "relationship", "rhetoric", "rhythm", "background", "initiative",
+}
+ALLOWED_THINKING_MOVE_KINDS = {
+    "impulse", "tradeoff", "relationship", "reversal", "association", "constraint",
 }
 DIMENSIONS = {
     "role_fidelity": 30,
@@ -128,20 +131,29 @@ def role_metadata(root: Path) -> Dict[str, str]:
     if not role_id or not display_name or not prefix:
         raise QualityLoopError("无法从角色资产读取稳定 ID、显示名或回复前缀")
     if asset_version != "3":
-        raise QualityLoopError("Persona Quality Loop v3 只用于人格资产版本 3")
+        raise QualityLoopError("Persona Quality Loop v4 只用于人格资产版本 3")
     return {"role_id": role_id, "display_name": display_name, "prefix": prefix, "asset_version": asset_version}
 
 
-def behavior_functions(root: Path) -> Dict[str, str]:
+def behavior_rules(root: Path) -> Dict[str, Dict[str, str]]:
     path = root / "references" / "12-行为辨识模型.md"
     if not path.is_file():
         return {}
     text = path.read_text(encoding="utf-8-sig")
     matches = list(BEHAV_HEADING_RE.finditer(text))
-    result: Dict[str, str] = {}
+    result: Dict[str, Dict[str, str]] = {}
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        result[match.group(1).upper()] = field_value(text[match.end():end], "行为功能").strip().lower()
+        block = text[match.end():end]
+        result[match.group(1).upper()] = {
+            "behavior_function": field_value(block, "行为功能").strip().lower(),
+            "counterintuitive_entry": field_value(block, "反直觉切入"),
+            "reasoning_order": field_value(block, "人物推理次序"),
+            "generic_skeleton_ban": field_value(block, "顾问骨架禁用"),
+            "identity_anchor": field_value(block, "去名识别锚点"),
+            "relationship_action": field_value(block, "对用户的关系动作"),
+            "boundary": field_value(block, "区别性边界"),
+        }
     return result
 
 
@@ -154,6 +166,17 @@ def anonymize_response(text: str, display_name: str, prefix: str) -> str:
     if display_name:
         value = value.replace(display_name, "[已隐藏身份]")
     return value
+
+
+def anonymize_identity_brief(brief: Mapping[str, Any], display_name: str) -> Dict[str, str]:
+    """Keep the evaluator's behavioral target while removing the role label."""
+    result: Dict[str, str] = {}
+    for key, value in brief.items():
+        text = str(value or "").strip()
+        if display_name:
+            text = text.replace(display_name, "[已隐藏身份]")
+        result[str(key)] = text
+    return result
 
 
 def validate_context_id(value: str, label: str) -> str:
@@ -285,7 +308,7 @@ def init_run(
 def _trace_errors(trace: Mapping[str, Any], response: str) -> List[str]:
     errors: List[str] = []
     if trace.get("contract_version") != CONTRACT_VERSION:
-        errors.append("generation_trace.contract_version 必须为 3")
+        errors.append("generation_trace.contract_version 必须为 4")
     behavior_ids = trace.get("behavior_rule_ids")
     if not isinstance(behavior_ids, list) or not behavior_ids:
         errors.append("generation_trace.behavior_rule_ids 不能为空")
@@ -320,6 +343,31 @@ def _trace_errors(trace: Mapping[str, Any], response: str) -> List[str]:
         errors.append("generation_trace.generic_near_miss_avoided 不能为空")
     if not str(trace.get("similar_role_boundary") or "").strip():
         errors.append("generation_trace.similar_role_boundary 不能为空")
+    if not str(trace.get("reasoning_order_realized") or "").strip():
+        errors.append("generation_trace.reasoning_order_realized 不能为空")
+    if not str(trace.get("generic_skeleton_avoided") or "").strip():
+        errors.append("generation_trace.generic_skeleton_avoided 不能为空")
+    moves = trace.get("thinking_moves")
+    if not isinstance(moves, list) or len(moves) < 2:
+        errors.append("至少需要两个 thinking_moves，证明人物推理不是装饰")
+    else:
+        move_kinds = set()
+        for move in moves:
+            if not isinstance(move, dict):
+                errors.append("thinking_moves 每项必须是对象")
+                continue
+            kind = str(move.get("kind") or "").strip().lower()
+            excerpt = str(move.get("excerpt") or "").strip()
+            rule_id = str(move.get("rule_id") or "").strip().upper()
+            move_kinds.add(kind)
+            if kind not in ALLOWED_THINKING_MOVE_KINDS:
+                errors.append(f"未知人物推理动作：{kind or 'empty'}")
+            if len(excerpt) < 3 or excerpt not in response:
+                errors.append(f"人物推理片段没有逐字出现在回复中：{excerpt or 'empty'}")
+            if not RULE_ID_RE.fullmatch(rule_id):
+                errors.append(f"人物推理缺少有效规则编号：{rule_id or 'empty'}")
+        if not move_kinds.intersection({"impulse", "tradeoff", "relationship", "reversal", "association"}):
+            errors.append("thinking_moves 缺少人物的取舍、关系、反转或联想动作")
     return errors
 
 
@@ -383,7 +431,7 @@ def record_responses(
     if len(items) != len(prompts) or len(items) < MIN_PROMPTS:
         raise QualityLoopError(f"实际运行回答必须与隐藏题逐项对应，当前 {len(items)}/{len(prompts)}")
     metadata = role_metadata(root)
-    behavior_map = behavior_functions(root)
+    behavior_map = behavior_rules(root)
     errors: List[str] = []
     normalized: List[Dict[str, Any]] = []
     for index, (prompt, item) in enumerate(zip(prompts, items), start=1):
@@ -417,7 +465,7 @@ def record_responses(
             str(value).upper() for value in trace.get("behavior_rule_ids", [])
         ] if isinstance(trace.get("behavior_rule_ids"), list) else []
         expected_function = str(prompt.get("behavior_function") or "").lower()
-        if not any(behavior_map.get(rule_id) == expected_function for rule_id in traced_behavior_ids):
+        if not any(behavior_map.get(rule_id, {}).get("behavior_function") == expected_function for rule_id in traced_behavior_ids):
             errors.append(
                 f"{expected_id} 的 BEHAV 规则没有实现隐藏题行为功能 {expected_function or 'missing'}"
             )
@@ -455,6 +503,20 @@ def record_responses(
     blind_items: List[Dict[str, Any]] = []
     blind_key: Dict[str, Dict[str, str]] = {}
     for item in normalized:
+        trace = item["generation_trace"] if isinstance(item.get("generation_trace"), dict) else {}
+        behavior_id = next((str(value).upper() for value in trace.get("behavior_rule_ids", []) if str(value).upper() in behavior_map), "")
+        behavior = behavior_map.get(behavior_id, {})
+        identity_brief = anonymize_identity_brief({
+            "behavior_rule_id": behavior_id,
+            "counterintuitive_entry": behavior.get("counterintuitive_entry", ""),
+            "reasoning_order": behavior.get("reasoning_order", ""),
+            "generic_skeleton_ban": behavior.get("generic_skeleton_ban", ""),
+            "identity_anchor": behavior.get("identity_anchor", ""),
+            "relationship_action": behavior.get("relationship_action", ""),
+            "boundary": behavior.get("boundary", ""),
+        }, metadata["display_name"])
+        if not all(str(value).strip() for value in identity_brief.values()):
+            raise QualityLoopError(f"{item['prompt_id']} 的 BEHAV 合同缺少 v4 人物辨识字段")
         candidates = [
             ("target", anonymize_response(str(item["response"]), metadata["display_name"], metadata["prefix"])),
             ("generic", anonymize_response(str(item["generic_control"]), metadata["display_name"], metadata["prefix"])),
@@ -471,6 +533,8 @@ def record_responses(
             "prompt_id": item["prompt_id"],
             "prompt": item["prompt"],
             "fact_invariants": item["fact_invariants"],
+            "identity_brief": identity_brief,
+            "identity_brief_sha256": sha256_json(identity_brief),
             "candidates": rendered_candidates,
         })
         blind_key[str(item["prompt_id"])] = item_key
@@ -479,7 +543,7 @@ def record_responses(
     atomic_write_json(blind_bundle_path, {
         "contract_version": CONTRACT_VERSION,
         "run_id": run_id,
-        "instructions": "逐题识别最像目标人物、最像通用助手和最像相似人物近失机制的候选；不要读取 blind-evaluation-key.json。",
+        "instructions": "逐题依据 identity_brief 识别目标、通用和相似人物候选。不得把‘通用顾问骨架加一处比喻’判为目标；每项必须逐字摘出目标、通用、相似三方证据，并判断人物推理次序是否真正实现。不要读取 blind-evaluation-key.json。",
         "items": blind_items,
     })
     atomic_write_json(blind_key_path, {"contract_version": CONTRACT_VERSION, "run_id": run_id, "items": blind_key})
@@ -553,6 +617,15 @@ def _evaluation_errors(
     blind_key = blind_key_payload.get("items") if isinstance(blind_key_payload, dict) else None
     if not isinstance(blind_key, dict):
         raise QualityLoopError("blind-evaluation-key.json 无效")
+    blind_bundle_path = resolve_inside(root, str(generation.get("blind_bundle_path") or ""))
+    if not blind_bundle_path.is_file() or sha256_file(blind_bundle_path) != generation.get("blind_bundle_sha256"):
+        raise QualityLoopError("盲评候选包缺失或哈希不匹配")
+    blind_bundle = read_json(blind_bundle_path)
+    blind_briefs = {
+        str(item.get("prompt_id") or ""): item
+        for item in (blind_bundle.get("items") if isinstance(blind_bundle, dict) and isinstance(blind_bundle.get("items"), list) else [])
+        if isinstance(item, dict)
+    }
     if len(items) != len(responses) or len(items) < MIN_PROMPTS:
         errors.append(f"评估项数量不匹配：{len(items)}/{len(responses)}")
     reasons: List[str] = []
@@ -565,13 +638,36 @@ def _evaluation_errors(
         if source is None:
             errors.append(f"评估含未知 prompt_id：{prompt_id or 'empty'}")
             continue
+        brief_item = blind_briefs.get(prompt_id, {})
+        expected_brief_hash = str(brief_item.get("identity_brief_sha256") or "")
+        if not expected_brief_hash:
+            errors.append(f"{prompt_id} 缺少匿名人物辨识摘要")
+        if str(item.get("identity_brief_sha256") or "") != expected_brief_hash:
+            errors.append(f"{prompt_id} 没有绑定当前匿名人物辨识摘要")
         reason = re.sub(r"\s+", " ", str(item.get("reason") or "").strip())
         excerpt = str(item.get("evidence_excerpt") or "").strip()
         response = str(source.get("response") or "")
-        if len(reason) < 12:
+        if len(reason) < 36:
             errors.append(f"{prompt_id} 缺少具体评估理由")
         if len(excerpt) < 2 or excerpt not in response:
             errors.append(f"{prompt_id} 的 evidence_excerpt 未逐字出现在回答中")
+        target_identity_excerpt = str(item.get("target_identity_excerpt") or "").strip()
+        generic_contrast_excerpt = str(item.get("generic_contrast_excerpt") or "").strip()
+        similar_contrast_excerpt = str(item.get("similar_contrast_excerpt") or "").strip()
+        generic_response = str(source.get("generic_control") or "")
+        similar_response = str(source.get("similar_control") or "")
+        if len(target_identity_excerpt) < 3 or target_identity_excerpt not in response:
+            errors.append(f"{prompt_id} 缺少目标人物的逐字辨识证据")
+        if len(generic_contrast_excerpt) < 3 or generic_contrast_excerpt not in generic_response:
+            errors.append(f"{prompt_id} 缺少通用助手的逐字对照证据")
+        if len(similar_contrast_excerpt) < 3 or similar_contrast_excerpt not in similar_response:
+            errors.append(f"{prompt_id} 缺少相似人物的逐字对照证据")
+        thought_order_match = item.get("thought_order_match")
+        generic_skeleton_detected = item.get("generic_skeleton_detected")
+        if not isinstance(thought_order_match, bool):
+            errors.append(f"{prompt_id}.thought_order_match 必须是布尔值")
+        if not isinstance(generic_skeleton_detected, bool):
+            errors.append(f"{prompt_id}.generic_skeleton_detected 必须是布尔值")
         reasons.append(reason.lower())
         dimensions: Dict[str, float] = {}
         for key in DIMENSIONS:
@@ -587,6 +683,8 @@ def _evaluation_errors(
         verdict = str(item.get("verdict") or "").lower()
         if verdict not in {"pass", "fail"}:
             errors.append(f"{prompt_id}.verdict 必须是 pass/fail")
+        if verdict == "pass" and (thought_order_match is not True or generic_skeleton_detected is True):
+            errors.append(f"{prompt_id} 将未实现人物推理或顾问骨架伪装错误判为 pass")
         item_key = blind_key.get(prompt_id) if isinstance(blind_key.get(prompt_id), dict) else {}
         target_candidate_id = str(item.get("target_candidate_id") or "").upper()
         generic_candidate_id = str(item.get("generic_candidate_id") or "").upper()
@@ -619,6 +717,12 @@ def _evaluation_errors(
             "fact_risk": fact_risk,
             "verdict": verdict,
             "evidence_excerpt": excerpt,
+            "target_identity_excerpt": target_identity_excerpt,
+            "generic_contrast_excerpt": generic_contrast_excerpt,
+            "similar_contrast_excerpt": similar_contrast_excerpt,
+            "thought_order_match": thought_order_match,
+            "generic_skeleton_detected": generic_skeleton_detected,
+            "identity_brief_sha256": str(item.get("identity_brief_sha256") or ""),
             "reason": reason,
             "failure_layers": raw_layers,
             "repair_targets": raw_targets,
@@ -631,6 +735,10 @@ def _evaluation_errors(
     generic_passes = sum(item.get("generic_control_correct") is True for item in normalized)
     similar_passes = sum(item.get("similar_role_distinguished") is True for item in normalized)
     item_passes = sum(item.get("verdict") == "pass" for item in normalized)
+    thinking_contract_count = sum(
+        item.get("thought_order_match") is True and item.get("generic_skeleton_detected") is False
+        for item in normalized
+    )
     scores = {key: _score_dimension(normalized, key, weight) for key, weight in DIMENSIONS.items()}
     fact_score = 10 if normalized and all(item.get("fact_risk") == "pass" for item in normalized) else 0
     total = sum(scores.values()) + fact_score
@@ -640,6 +748,7 @@ def _evaluation_errors(
         "generic_control_identified_count": generic_passes,
         "similar_role_distinguished_count": similar_passes,
         "item_pass_count": item_passes,
+        "thinking_contract_count": thinking_contract_count,
         "role_fidelity": scores["role_fidelity"],
         "emotional_value": scores["emotional_value"],
         "proactive_expression": scores["proactive_expression"],
@@ -654,6 +763,7 @@ def _evaluation_errors(
         "generic_control": generic_passes >= MIN_BLIND_PASSES,
         "similar_role": similar_passes >= MIN_SIMILAR_PASSES,
         "item_passes": item_passes >= MIN_BLIND_PASSES,
+        "thinking_contract": thinking_contract_count >= MIN_BLIND_PASSES,
         "role_fidelity": scores["role_fidelity"] >= 26,
         "emotional_value": scores["emotional_value"] >= 16,
         "proactive_expression": scores["proactive_expression"] >= 12,
@@ -757,7 +867,7 @@ def status(root: Path) -> Dict[str, Any]:
         metrics["failure_layers"] = list(manifest.get("failure_layers") or [])
         metrics["repair_targets"] = list(manifest.get("repair_targets") or [])
         if manifest.get("contract_version") != CONTRACT_VERSION:
-            issues.append(_status_issue("quality_loop.contract_invalid", "质量循环 contract_version 必须为 3"))
+            issues.append(_status_issue("quality_loop.contract_invalid", "质量循环 contract_version 必须为 4"))
         current_bundle = persona_bundle_sha256(root)
         metrics["persona_bundle_current"] = manifest.get("persona_bundle_sha256") == current_bundle
         if not metrics["persona_bundle_current"]:
@@ -864,7 +974,7 @@ def _print_result(result: Mapping[str, Any]) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Persona Quality Loop v3")
+    parser = argparse.ArgumentParser(description="Persona Quality Loop v4")
     subparsers = parser.add_subparsers(dest="command", required=True)
     init_parser = subparsers.add_parser("init")
     init_parser.add_argument("path")

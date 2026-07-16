@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 
-CHECKER_CONTRACT_VERSION = 4
+CHECKER_CONTRACT_VERSION = 5
 ANTI_HEADING_RE = re.compile(r"^###\s+(ANTI-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 EXPR_HEADING_RE = re.compile(r"^###\s+(EXPR-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 BEHAV_HEADING_RE = re.compile(r"^##\s+(BEHAV-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
@@ -53,11 +53,17 @@ GENERIC_CONSULTING_PATTERNS = (
     r"(?:先|先别).{0,48}(?:再|然后|之后|我们就|就能)",
     r"(?:给谁用|要解决什么|最重要的是).{0,40}(?:先|定|确认)",
 )
+PITCH_DECK_PATTERNS = (
+    r"(?:第一版|首版|第一期|MVP).{0,28}(?:做|包括|功能|先上)",
+    r"(?:赚钱方式|收费方式|商业模式|定价|订阅).{0,48}(?:月|元|起|抽成|比例|档)",
+    r"(?:市场|用户|赛道|竞品|增长).{0,36}(?:分析|定位|验证|规模)",
+)
 WORKFLOW_FRAME_RE = re.compile(r"先.{0,70}(?:再|然后|之后|我们|就能)|(?:先|再|然后|最后).*(?:先|再|然后|最后)")
 QUESTION_END_RE = re.compile(r"[？?][”’\"']?\s*$")
 ALLOWED_VISIBLE_SIGNAL_KINDS = {
     "judgment", "emotion", "relationship", "rhetoric", "rhythm", "background", "initiative",
 }
+ALLOWED_THINKING_MOVE_KINDS = {"impulse", "tradeoff", "relationship", "reversal", "association", "constraint"}
 
 
 def read_text(path: Path) -> str:
@@ -248,6 +254,14 @@ def analyze(text: str, root: Path, trace: dict[str, object] | None = None) -> di
             8 if (profiled_expression or profiled_long_form) else 14,
             consulting_hits[0],
         )
+    pitch_deck_hits = unique_pattern_hits(prose, PITCH_DECK_PATTERNS)
+    if pitch_deck_hits:
+        has_v4_thinking = isinstance(trace, dict) and trace.get("contract_version") == 4 and isinstance(trace.get("thinking_moves"), list) and len(trace.get("thinking_moves")) >= 2
+        add_finding(
+            findings, "generic_pitch_deck_frame",
+            48 if not has_v4_thinking else 18,
+            " / ".join(pitch_deck_hits),
+        )
 
     sequence_hits = unique_literal_hits(prose, SEQUENCE_MARKERS)
     if len(sequence_hits) >= 3:
@@ -318,8 +332,8 @@ def analyze(text: str, root: Path, trace: dict[str, object] | None = None) -> di
             if unknown_bio:
                 trace_findings.append({"code": "trace_background_id_unknown", "detail": "未知背景编号：" + " / ".join(unknown_bio)})
         if current_asset_version >= 3:
-            if trace.get("contract_version") != 3:
-                trace_findings.append({"code": "trace_v3_contract_missing", "detail": "人物资产 v3 的 generation_trace.contract_version 必须为 3"})
+            if trace.get("contract_version") != 4:
+                trace_findings.append({"code": "trace_v4_contract_missing", "detail": "人物资产 v3 的 generation_trace.contract_version 必须为 4"})
             if not behavior_ids:
                 trace_findings.append({"code": "behavior_contract_missing", "detail": "缺少 BEHAV 行为合同追溯"})
             visible_signals = trace.get("visible_character_signals")
@@ -349,6 +363,31 @@ def analyze(text: str, root: Path, trace: dict[str, object] | None = None) -> di
                 trace_findings.append({"code": "generic_contrast_missing", "detail": "没有记录如何避开通用助手近失样本"})
             if not str(trace.get("similar_role_boundary") or "").strip():
                 trace_findings.append({"code": "similar_role_boundary_missing", "detail": "没有记录目标人物与相似人物的区别性边界"})
+            if not str(trace.get("reasoning_order_realized") or "").strip():
+                trace_findings.append({"code": "reasoning_order_missing", "detail": "没有记录人物专属推理次序如何落到回答"})
+            if not str(trace.get("generic_skeleton_avoided") or "").strip():
+                trace_findings.append({"code": "generic_skeleton_avoidance_missing", "detail": "没有记录具体避开的顾问骨架"})
+            moves = trace.get("thinking_moves")
+            if not isinstance(moves, list) or len(moves) < 2:
+                trace_findings.append({"code": "thinking_moves_low", "detail": "至少需要两个可见人物推理动作"})
+            else:
+                kinds: set[str] = set()
+                for move in moves:
+                    if not isinstance(move, dict):
+                        trace_findings.append({"code": "thinking_move_invalid", "detail": "人物推理动作必须是对象"})
+                        continue
+                    kind = str(move.get("kind") or "").strip().lower()
+                    excerpt = str(move.get("excerpt") or "").strip()
+                    rule_id = str(move.get("rule_id") or "").strip().upper()
+                    kinds.add(kind)
+                    if kind not in ALLOWED_THINKING_MOVE_KINDS:
+                        trace_findings.append({"code": "thinking_move_kind_invalid", "detail": f"未知人物推理动作：{kind or 'empty'}"})
+                    if len(excerpt) < 3 or excerpt not in text:
+                        trace_findings.append({"code": "thinking_move_not_visible", "detail": f"人物推理片段未逐字出现在回答中：{excerpt or 'empty'}"})
+                    if rule_id not in known_rules:
+                        trace_findings.append({"code": "thinking_move_rule_unknown", "detail": f"人物推理动作引用未知规则：{rule_id or 'empty'}"})
+                if not kinds.intersection({"impulse", "tradeoff", "relationship", "reversal", "association"}):
+                    trace_findings.append({"code": "thinking_move_character_missing", "detail": "人物推理缺少取舍、关系、反转或联想动作"})
         elif not presence_values or not (mind_ids or expression_ids):
             trace_findings.append({"code": "character_presence_missing", "detail": "缺少人物判断、情绪或关系动作及其 MIND/EXPR 追溯"})
         exact_quotes = trace.get("exact_quotes", [])

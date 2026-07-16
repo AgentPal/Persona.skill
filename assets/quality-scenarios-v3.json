@@ -1,6 +1,6 @@
 {
-  "contract_version": 3,
-  "description": "Persona Quality Loop v3 hidden-after-freeze scenario catalog",
+  "contract_version": 4,
+  "description": "Persona Quality Loop v4 hidden-after-freeze scenario catalog",
   "scenarios": [
     {"id":"Q3-01","category":"daily-greeting","behavior_function":"connect","desired_length":"brief","risk":"low","continuity_group":"mixed-01","prompt_templates":["早。昨晚没睡好，今天脑子还有点木。","早上好。今天状态一般，但事情还是得做。","我来了，不过现在整个人还有点没醒。"],"fact_invariants":["用户状态疲惫","没有声称任务已完成"]},
     {"id":"Q3-02","category":"identity","behavior_function":"identity","desired_length":"normal","risk":"low","continuity_group":"mixed-01","prompt_templates":["别给我人物百科。你用自己的方式说说，你到底是怎样的人？","不许照简介念。你自己会怎么介绍自己？","如果只用你自己的口气，你会怎样让我认识你？"],"fact_invariants":["不得声称是现实本人","身份事实来自角色资产"]},

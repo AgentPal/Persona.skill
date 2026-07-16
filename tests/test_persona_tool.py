@@ -383,7 +383,7 @@ def build_fixture(
                     "response_shape": f"fixture-shape-{index:02d}",
                     "exact_quotes": [],
                     **({
-                        "contract_version": 3,
+                        "contract_version": 4,
                         "behavior_rule_ids": [f"BEHAV-{((index - 1) % 12) + 1:02d}"],
                         "visible_character_signals": [
                             {
@@ -404,6 +404,12 @@ def build_fixture(
                         ],
                         "generic_near_miss_avoided": f"第 {index} 轮没有采用确认后推进的通用骨架",
                         "similar_role_boundary": f"第 {index} 轮保留测试角色的关系取舍与解释路径",
+                        "reasoning_order_realized": f"第 {index} 轮先看见反常代价，再给关系动作，最后落回事实",
+                        "generic_skeleton_avoided": f"第 {index} 轮没有走选赛道、列功能、定价的顾问骨架",
+                        "thinking_moves": [
+                            {"kind": "tradeoff", "rule_id": f"BEHAV-{((index - 1) % 12) + 1:02d}", "excerpt": response[:6]},
+                            {"kind": "association", "rule_id": f"EXPR-{((index - 1) % 6) + 1:02d}", "excerpt": response[-6:]},
+                        ],
                     } if asset_version >= 3 else {}),
                 }
             } if asset_version >= 2 else {}),
@@ -1195,6 +1201,10 @@ def build_fixture(
 - 对用户的关系动作：{relation_actions[index - 1]}
 - 情绪轨迹：从识别当前事件，经由人物取舍转向可见关系动作 {index}
 - 话语动作序列：{sequences[index - 1]}
+- 反直觉切入：{first_reactions[index - 1]}，不让标准方案抢在人物看见的真实代价前面
+- 人物推理次序：{sequences[index - 1]}，随后才落到一个可承担的事实动作
+- 顾问骨架禁用：{boundaries[index - 1]}；禁止把它改写成结论→三点理由→标准下一步
+- 去名识别锚点：{relation_actions[index - 1]}，先从这份关系姿态组织判断而不是直接给效率方案
 - 形状候选：短促人物判断后停住 / 从角色意象绕回当前事实
 - 可见角色信号：人物判断与关系动作 / 角色特有因果、意象或断句
 - 最小实现：一个人物判断片段加一个角色表达片段，二者都必须逐字存在于回答
@@ -1311,7 +1321,7 @@ def build_fixture(
                 "similar_control": f"相似回答 {index}：先温和接住当前情况，再用中立态度把事情向前带。",
                 "generation_readiness": "high",
                 "generation_trace": {
-                    "contract_version": 3,
+                    "contract_version": 4,
                     "behavior_rule_ids": [f"BEHAV-{behavior_rule:02d}"],
                     "mind_rule_ids": [f"MIND-{((index - 1) % 6) + 1:02d}"],
                     "expression_rule_ids": [f"EXPR-{((index - 1) % 6) + 1:02d}"],
@@ -1320,6 +1330,12 @@ def build_fixture(
                     "response_shape": f"quality-shape-{index:02d}",
                     "generic_near_miss_avoided": f"样本 {index} 没有使用统一确认、分步和追问收尾",
                     "similar_role_boundary": f"样本 {index} 保留人物自己的取舍和关系动作",
+                    "reasoning_order_realized": f"样本 {index} 先抓反常代价，再给关系动作，最后才落回事实",
+                    "generic_skeleton_avoided": f"样本 {index} 没有走选赛道、列功能、定价或结论三段式",
+                    "thinking_moves": [
+                        {"kind": "tradeoff", "rule_id": f"BEHAV-{behavior_rule:02d}", "excerpt": body[:8]},
+                        {"kind": "association", "rule_id": f"EXPR-{((index - 1) % 6) + 1:02d}", "excerpt": body[-8:]},
+                    ],
                     "exact_quotes": [],
                 },
             })
@@ -1335,6 +1351,11 @@ def build_fixture(
         quality_manifest = json.loads((target / "tests" / "quality-loop.json").read_text(encoding="utf-8"))
         blind_key_path = target / quality_manifest["generation"]["blind_key_path"]
         blind_key = json.loads(blind_key_path.read_text(encoding="utf-8"))["items"]
+        blind_bundle_path = target / quality_manifest["generation"]["blind_bundle_path"]
+        blind_bundle = {
+            item["prompt_id"]: item
+            for item in json.loads(blind_bundle_path.read_text(encoding="utf-8"))["items"]
+        }
         evaluation_items = []
         for index, item in enumerate(quality_responses, start=1):
             body = item["response"][len("测试角色："):]
@@ -1351,7 +1372,13 @@ def build_fixture(
                 "fact_risk": "pass",
                 "verdict": "pass",
                 "evidence_excerpt": body[:8],
-                "reason": f"样本 {index} 的摘录显示人物先作自己的取舍，再以不同于通用助手的关系与修辞完成回应。",
+                "target_identity_excerpt": body[:8],
+                "generic_contrast_excerpt": f"通用回答 {index}",
+                "similar_contrast_excerpt": f"相似回答 {index}",
+                "identity_brief_sha256": blind_bundle[item["prompt_id"]]["identity_brief_sha256"],
+                "thought_order_match": True,
+                "generic_skeleton_detected": False,
+                "reason": f"样本 {index} 的目标摘录先呈现人物取舍，通用候选只按标准方式处理，相似候选只给中立鼓励；三者的关系动作与解释次序可逐字区分。",
                 "failure_layers": [],
                 "repair_targets": [],
             })
@@ -1424,7 +1451,7 @@ class PersonaToolTests(unittest.TestCase):
             )
 
             batch = json.loads((role / "tests" / "runtime-batch-check.json").read_text(encoding="utf-8"))
-            self.assertEqual(batch["checker_contract_version"], 4)
+            self.assertEqual(batch["checker_contract_version"], 5)
             self.assertEqual(batch["status"], "pass")
             self.assertGreaterEqual(batch["emotional_response_coverage"], 60)
             self.assertGreaterEqual(batch["proactive_expression_coverage"], 40)
@@ -3246,11 +3273,11 @@ class PersonaToolTests(unittest.TestCase):
                 text=True, encoding="utf-8",
             ))
             contract = selected["response_contract"]
-            self.assertEqual(contract["contract_version"], 3)
+            self.assertEqual(contract["contract_version"], 4)
             self.assertTrue(contract["ready"])
             self.assertEqual(contract["behavior_function"], "warn")
             self.assertIn("BEHAV-08", contract["behavior_rule_ids"])
-            self.assertEqual(len(contract["required_visible_slots"]), 2)
+            self.assertEqual(len(contract["required_visible_slots"]), 3)
 
     def test_persona_asset_v3_invalidates_scores_after_persona_change(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -3426,6 +3453,44 @@ class PersonaToolTests(unittest.TestCase):
                 text=True, encoding="utf-8",
             ))
             self.assertNotEqual(generic["status"], "pass")
+
+    def test_v4_rejects_pitch_deck_advice_even_when_it_has_a_persona_metaphor(self) -> None:
+        """Regression for the screenshot failure: consultant outline is not character thinking."""
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "persona-test-role"
+            build_fixture(role, "existing-character", 80, scene_count=24, signature_count=12, asset_version=3)
+            checker = role / "scripts" / "check_response.py"
+            reply = (
+                "我会选一个明确方向：做 Agent Skill 可仓库商店。不是卖提示词，而是卖三件事：装得上、跑得稳、不乱动。"
+                "第一版做这些：Skill 上传、版本兼容检查、各运行时一键安装、权限扫描、质量评分、团队私有仓库。"
+                "赚钱方式：个人版每月 29–99 元，团队版每月 999 元起，商店交易抽成 10%–20%。"
+                "这事像人丢进海里，但你有优势。"
+            )
+            checked = json.loads(subprocess.check_output(
+                [sys.executable, str(checker), "--root", str(role), "--text", reply],
+                text=True, encoding="utf-8",
+            ))
+            self.assertNotEqual(checked["status"], "pass", checked)
+            self.assertTrue(any(item["code"] == "generic_pitch_deck_frame" for item in checked["findings"]))
+
+    def test_v4_evaluation_rejects_false_pass_for_detected_consulting_skeleton(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "persona-test-role"
+            build_fixture(role, "existing-character", 80, scene_count=24, signature_count=12, asset_version=3)
+            manifest = json.loads((role / "tests" / "quality-loop.json").read_text(encoding="utf-8"))
+            manifest["status"] = "evaluation-pending"
+            manifest["evaluation"] = {"status": "pending"}
+            write_text(role / "tests" / "quality-loop.json", json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+            evaluation_path = role / "tests" / "quality-input-evaluation.json"
+            evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+            evaluation["items"][0]["generic_skeleton_detected"] = True
+            evaluation["items"][0]["verdict"] = "pass"
+            write_text(evaluation_path, json.dumps(evaluation, ensure_ascii=False, indent=2) + "\n")
+            result = persona_tool.quality.evaluate_run(
+                role, manifest["run_id"], evaluation_path, "fixture-evaluator-context-009",
+            )
+            self.assertEqual(result["status"], "repair-required")
+            self.assertTrue(any("顾问骨架伪装" in error for error in result["contract_errors"]))
 
     def test_creator_defaults_identity_prefix_and_formal_only_delivery(self) -> None:
         creator = (ROOT / "SKILL.md").read_text(encoding="utf-8")

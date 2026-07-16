@@ -204,6 +204,7 @@ REQUIRED_EXPR_FIELDS = (
 )
 REQUIRED_BEHAVIOR_FIELDS = (
     "行为功能", "触发族", "第一反应", "核心取舍", "对用户的关系动作", "情绪轨迹", "话语动作序列",
+    "反直觉切入", "人物推理次序", "顾问骨架禁用", "去名识别锚点",
     "形状候选", "可见角色信号", "最小实现", "强度升级", "通用助手近失样本", "相似人物近失样本",
     "区别性边界", "禁用与事实边界", "检索条件", "证据卡", "证据映射", "连接资产", "失败归因", "置信度",
 )
@@ -253,7 +254,7 @@ RESEARCH_PROFILES = {
 }
 RICH_CORPUS_MIN_CARDS = 80
 RICH_CORPUS_RECOMMENDED_MAX_CARDS = 300
-RESPONSE_CHECKER_CONTRACT_VERSION = 4
+RESPONSE_CHECKER_CONTRACT_VERSION = 5
 RICH_CORPUS_TYPES = {"existing-character", "composite-character", "real-person-simulation"}
 REQUIRED_RESEARCH_AUDIT_FIELDS = (
     "资料丰度判定依据", "资料丰度边界说明", "候选表达数", "正式原文卡数", "待核验表达数", "排除表达数",
@@ -3730,7 +3731,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         add_semantic_diversity_issues(
             issues,
             behavior_blocks,
-            ("第一反应", "核心取舍", "对用户的关系动作", "话语动作序列", "区别性边界"),
+            ("第一反应", "核心取舍", "对用户的关系动作", "话语动作序列", "反直觉切入", "人物推理次序", "顾问骨架禁用", "去名识别锚点", "区别性边界"),
             "behavior.semantic_boilerplate",
             "行为辨识模型",
             behavior_path,
@@ -4397,7 +4398,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 issues,
                 "error" if level == "release" else "warning",
                 str(item.get("code") or "quality_loop.invalid"),
-                str(item.get("message") or "Persona Quality Loop v3 未通过"),
+                str(item.get("message") or "Persona Quality Loop v4 未通过"),
                 root / "tests" / "quality-loop.json",
                 root,
             )
@@ -4695,7 +4696,7 @@ def classify_loop_stage(error_codes: list[str]) -> tuple[str, str]:
         ("quality_loop.layer.source", "RESEARCH", "按失败样本补充代表性来源、语境与行为功能覆盖，然后重新冻结人格并生成新隐藏题。"),
         ("quality_loop.layer.behavior-model", "REDISTILL", "根据失败样本重写 BEHAV/MIND/EXPR 的区别性机制和近失对照，然后重新冻结人格。"),
         ("quality_loop.layer.retrieval", "RETRIEVE", "修正选择器检索条件、工作迁移与证据组合，再用新运行记录重测。"),
-        ("quality_loop.layer.generation", "REGENERATE", "按 v3 response_contract 修复回答生成和可见信号实现，再重跑隐藏场景。"),
+        ("quality_loop.layer.generation", "REGENERATE", "按 v4 response_contract 修复回答生成、人物推理动作和可见信号实现，再重跑隐藏场景。"),
         ("quality_loop.layer.runtime", "RUNTIME", "核对实际运行时加载、前缀、角色哈希与响应记录后重测。"),
         ("quality_loop.layer.evaluation", "EVALUATE", "换用未参与生成的隔离上下文完成逐条盲评，不能由生成者自评。"),
     )
@@ -5049,7 +5050,7 @@ def cmd_quality_init(args: argparse.Namespace) -> int:
         print(f"PERSONA_BUNDLE_SHA256={result['persona_bundle_sha256']}")
         print(f"PROMPT_COUNT={result['prompt_count']}")
         print("LOOP_STAGE=RUNTIME-TEST")
-        _print_quality_progress("真实对话测试", "人格已冻结并在冻结后抽取隐藏场景", "让实际 Runtime 逐题生成连续回答，保存 v3 generation_trace 后运行 quality-record。")
+        _print_quality_progress("真实对话测试", "人格已冻结并在冻结后抽取隐藏场景", "让实际 Runtime 逐题生成连续回答，保存 v4 generation_trace 后运行 quality-record。")
         print("NEXT_ACTION=不得预写答案或由静态样例代替；使用 challenge.json 的原始问题在实际 Runtime 中生成同一连续对话。")
         return 0
     except quality.QualityLoopError as exc:
@@ -5442,7 +5443,7 @@ def build_parser() -> argparse.ArgumentParser:
     gate_parser.set_defaults(func=cmd_completion_gate)
 
     quality_init_parser = subparsers.add_parser(
-        "quality-init", help="冻结人物资产并在冻结后生成 Persona Quality Loop v3 隐藏场景"
+        "quality-init", help="冻结人物资产并在冻结后生成 Persona Quality Loop v4 隐藏场景"
     )
     quality_init_parser.add_argument("path", help="角色人格 Skill 目录")
     quality_init_parser.add_argument("--generator-context-id", required=True, help="实际生成回答的任务/上下文稳定标识")
