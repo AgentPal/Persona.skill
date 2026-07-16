@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Iterable
 
 import runtime_lifecycle as lifecycle
+import quality_loop as quality
 
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,7 @@ ANTI_HEADING_RE = re.compile(r"^###\s+(ANTI-\d{2})\s+\|", re.MULTILINE | re.IGNO
 BIO_HEADING_RE = re.compile(r"^###\s+(BIO-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 MIND_HEADING_RE = re.compile(r"^###\s+(MIND-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 EXPR_HEADING_RE = re.compile(r"^###\s+(EXPR-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+BEHAV_HEADING_RE = re.compile(r"^##\s+(BEHAV-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 COMPOSITE_WORK_HEADING_RE = re.compile(
     r"^###\s+(WORK-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE
 )
@@ -200,6 +202,18 @@ REQUIRED_EXPR_FIELDS = (
     "解释手法", "比喻或意象来源", "经历回调", "典故或名句政策", "幽默与讽刺", "篇幅档", "绕话与重复",
     "主动表达习惯", "适用触发", "证据卡", "背景条目", "证据映射", "禁用条件", "置信度",
 )
+REQUIRED_BEHAVIOR_FIELDS = (
+    "行为功能", "触发族", "第一反应", "核心取舍", "对用户的关系动作", "情绪轨迹", "话语动作序列",
+    "形状候选", "可见角色信号", "最小实现", "强度升级", "通用助手近失样本", "相似人物近失样本",
+    "区别性边界", "禁用与事实边界", "检索条件", "证据卡", "证据映射", "连接资产", "失败归因", "置信度",
+)
+REQUIRED_BEHAVIOR_FUNCTIONS = {
+    "connect", "explain", "reassure", "disagree", "admit-error", "celebrate",
+    "wait", "warn", "clarify", "refuse", "identity", "close",
+}
+ALLOWED_FAILURE_ATTRIBUTION_LAYERS = {
+    "source", "behavior-model", "retrieval", "generation", "runtime", "evaluation",
+}
 MIND_COVERAGE_MARKERS = {
     "value_conflict": ("价值", "欲望", "取舍"),
     "defense": ("防御", "担心", "害怕"),
@@ -239,6 +253,7 @@ RESEARCH_PROFILES = {
 }
 RICH_CORPUS_MIN_CARDS = 80
 RICH_CORPUS_RECOMMENDED_MAX_CARDS = 300
+RESPONSE_CHECKER_CONTRACT_VERSION = 4
 RICH_CORPUS_TYPES = {"existing-character", "composite-character", "real-person-simulation"}
 REQUIRED_RESEARCH_AUDIT_FIELDS = (
     "资料丰度判定依据", "资料丰度边界说明", "候选表达数", "正式原文卡数", "待核验表达数", "排除表达数",
@@ -621,6 +636,13 @@ def iter_expr_blocks(text: str) -> Iterable[tuple[str, str]]:
     boundaries = sorted(item.start() for pattern in (MIND_HEADING_RE, EXPR_HEADING_RE) for item in pattern.finditer(text))
     for match in matches:
         end = next((position for position in boundaries if position > match.start()), len(text))
+        yield match.group(1).upper(), text[match.end() : end]
+
+
+def iter_behavior_blocks(text: str) -> Iterable[tuple[str, str]]:
+    matches = list(BEHAV_HEADING_RE.finditer(text))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
         yield match.group(1).upper(), text[match.end() : end]
 
 
@@ -1090,6 +1112,16 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         "biography_baseline_complete": False,
         "mind_rules": 0,
         "expression_rules": 0,
+        "behavior_rules": 0,
+        "behavior_functions": 0,
+        "behavior_function_coverage_complete": False,
+        "quality_loop_pass": False,
+        "quality_loop_status": "missing",
+        "quality_loop_prompt_count": 0,
+        "quality_loop_blind_target_count": 0,
+        "quality_loop_generic_control_count": 0,
+        "quality_loop_similar_role_count": 0,
+        "quality_loop_total_score": 0,
         "subjective_memory_entries": 0,
         "analogy_domains": 0,
         "quotation_policy_complete": False,
@@ -1206,10 +1238,10 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 persona_asset_version = int(raw_asset_version)
             except ValueError:
                 persona_asset_version = 0
-        if persona_asset_version not in {1, 2}:
+        if persona_asset_version not in {1, 2, 3}:
             add_issue(
                 issues, "error" if level == "release" else "warning", "persona.asset_version_invalid",
-                "人格资产版本必须是 1 或 2", core_path, root,
+                "人格资产版本必须是 1、2 或 3", core_path, root,
             )
         elif persona_asset_version == 1:
             add_issue(
@@ -1264,6 +1296,17 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
         add_issue(
             issues, "error", "file.missing_v2", "人物资产 v2 缺少 references/11-心理机制与表达策略.md",
             strategy_path, root,
+        )
+    behavior_path = root / "references" / "12-行为辨识模型.md"
+    if persona_asset_version >= 3 and not behavior_path.is_file():
+        add_issue(
+            issues, "error", "file.missing_v3", "人物资产 v3 缺少 references/12-行为辨识模型.md",
+            behavior_path, root,
+        )
+    if persona_asset_version == 2:
+        add_issue(
+            issues, "warning", "persona.asset_v2_legacy",
+            "当前角色使用人物资产 v2；保持兼容，但新建角色应迁移到可执行行为辨识与真实质量循环 v3", core_path, root,
         )
 
     sources_path = root / "references" / "08-来源索引.md"
@@ -2685,7 +2728,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                     "CASE-23 检查输出与当前批量输入哈希不一致，必须对真实对话重新运行检查器",
                     batch_output_path, root,
                 )
-            if batch_output.get("checker_contract_version") != 3:
+            if batch_output.get("checker_contract_version") != RESPONSE_CHECKER_CONTRACT_VERSION:
                 add_issue(
                     issues, "error" if level == "release" else "warning", "tests.batch_checker_version_stale",
                     "CASE-23 检查输出不是当前严格批量门禁版本；请同步最新 check_response.py 后重跑",
@@ -3574,6 +3617,141 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 strategy_path, root,
             )
 
+    behavior_text = read_text(behavior_path) if behavior_path.is_file() else ""
+    behavior_blocks = list(iter_behavior_blocks(behavior_text)) if persona_asset_version >= 3 else []
+    behavior_functions: set[str] = set()
+    known_connected_ids: set[str] = set()
+    if persona_asset_version >= 3:
+        references_dir = root / "references"
+        for reference_file in references_dir.glob("*.md") if references_dir.is_dir() else []:
+            known_connected_ids.update(
+                item.upper()
+                for item in re.findall(
+                    r"\b(?:CORE|MIND|EXPR|VOICE|MODE|MICRO|ANTI|BIO)-\d{2}\b",
+                    read_text(reference_file), re.IGNORECASE,
+                )
+            )
+        duplicate_behavior_ids = sorted(
+            rule_id for rule_id, count in Counter(item[0] for item in behavior_blocks).items() if count > 1
+        )
+        if duplicate_behavior_ids:
+            add_issue(
+                issues, "error", "behavior.duplicate_id",
+                "行为辨识编号重复：" + ", ".join(duplicate_behavior_ids), behavior_path, root,
+            )
+        for rule_id, block in behavior_blocks:
+            missing_fields = [
+                field for field in REQUIRED_BEHAVIOR_FIELDS
+                if not has_substantive_value(field_value(block, field))
+            ]
+            if missing_fields:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "behavior.field_missing",
+                    f"{rule_id} 缺少可执行字段：{', '.join(missing_fields)}", behavior_path, root,
+                )
+            behavior_function = (field_value(block, "行为功能") or "").strip().lower()
+            if behavior_function:
+                behavior_functions.add(behavior_function)
+            if behavior_function not in REQUIRED_BEHAVIOR_FUNCTIONS:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "behavior.function_invalid",
+                    f"{rule_id} 的行为功能无效：{behavior_function or 'missing'}", behavior_path, root,
+                )
+            shapes = split_values(field_value(block, "形状候选") or "")
+            if len(shapes) < 2:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "behavior.shapes_low",
+                    f"{rule_id} 至少需要两种不同回答形状", behavior_path, root,
+                )
+            signals = split_values(field_value(block, "可见角色信号") or "")
+            if len(signals) < 2:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "behavior.visible_signals_low",
+                    f"{rule_id} 至少需要两类内容级可见角色信号", behavior_path, root,
+                )
+            generic_near_miss = normalize_template_text(field_value(block, "通用助手近失样本") or "")
+            similar_near_miss = normalize_template_text(field_value(block, "相似人物近失样本") or "")
+            if generic_near_miss and generic_near_miss == similar_near_miss:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "behavior.contrast_not_distinct",
+                    f"{rule_id} 的通用助手与相似人物近失样本没有实质差异", behavior_path, root,
+                )
+            evidence_ids = set(re.findall(
+                r"\b[A-Z0-9][A-Z0-9-]*-\d{4}\b", field_value(block, "证据卡") or "", re.IGNORECASE,
+            ))
+            evidence_ids = {item.upper() for item in evidence_ids}
+            if len(evidence_ids) < 3:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "behavior.evidence_too_few",
+                    f"{rule_id} 至少需要三张表达卡", behavior_path, root,
+                )
+            elif len({card_scene_ids.get(card_id) for card_id in evidence_ids if card_scene_ids.get(card_id)}) < 3:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "behavior.evidence_units_low",
+                    f"{rule_id} 的证据必须来自至少三个不同证据单元", behavior_path, root,
+                )
+            unknown_evidence = sorted(evidence_ids - evidence_card_ids)
+            if unknown_evidence:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "behavior.evidence_invalid",
+                    f"{rule_id} 引用了不存在、未核验或非原始语言的卡片：" + ", ".join(unknown_evidence),
+                    behavior_path, root,
+                )
+            connected_ids = {
+                item.upper() for item in re.findall(
+                    r"\b(?:CORE|MIND|EXPR|VOICE|MODE|MICRO|ANTI|BIO)-\d{2}\b",
+                    field_value(block, "连接资产") or "", re.IGNORECASE,
+                )
+            }
+            if len(connected_ids) < 3:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "behavior.connected_assets_low",
+                    f"{rule_id} 至少要连接三个已有资产规则", behavior_path, root,
+                )
+            unknown_connected = sorted(connected_ids - known_connected_ids)
+            if unknown_connected:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "behavior.connected_assets_invalid",
+                    f"{rule_id} 引用了未知连接资产：" + ", ".join(unknown_connected), behavior_path, root,
+                )
+            failure_layers = {
+                item.strip().lower() for item in re.split(r"[/,，、|]", field_value(block, "失败归因") or "") if item.strip()
+            }
+            invalid_layers = sorted(failure_layers - ALLOWED_FAILURE_ATTRIBUTION_LAYERS)
+            if invalid_layers:
+                add_issue(
+                    issues, "error" if level == "release" else "warning", "behavior.failure_layer_invalid",
+                    f"{rule_id} 含未知失败归因层：" + ", ".join(invalid_layers), behavior_path, root,
+                )
+            validate_rule_evidence_mapping(
+                issues, rule_id, block, card_blocks_by_id, behavior_path, root, level, "behavior",
+                require_retrieval=True,
+            )
+        add_semantic_diversity_issues(
+            issues,
+            behavior_blocks,
+            ("第一反应", "核心取舍", "对用户的关系动作", "话语动作序列", "区别性边界"),
+            "behavior.semantic_boilerplate",
+            "行为辨识模型",
+            behavior_path,
+            root,
+            level,
+        )
+        missing_functions = sorted(REQUIRED_BEHAVIOR_FUNCTIONS - behavior_functions)
+        if level == "release" and len(behavior_blocks) < 12:
+            add_issue(
+                issues, target_severity, "behavior.count_low",
+                f"行为辨识规则仅 {len(behavior_blocks)} 条，人物资产 v3 至少需要 12 条", behavior_path, root,
+            )
+        if level == "release" and missing_functions:
+            add_issue(
+                issues, target_severity, "behavior.function_coverage_missing",
+                "行为辨识模型未覆盖功能：" + ", ".join(missing_functions), behavior_path, root,
+            )
+    metrics["behavior_rules"] = len(behavior_blocks)
+    metrics["behavior_functions"] = len(behavior_functions)
+    metrics["behavior_function_coverage_complete"] = REQUIRED_BEHAVIOR_FUNCTIONS.issubset(behavior_functions)
+
     core_blocks = list(iter_core_blocks(core_text))
     duplicate_core_ids = sorted(core_id for core_id, count in Counter(item[0] for item in core_blocks).items() if count > 1)
     if duplicate_core_ids:
@@ -4202,6 +4380,28 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 sources_path,
                 root,
             )
+    if persona_asset_version >= 3:
+        quality_result = quality.status(root)
+        quality_metrics = quality_result.get("metrics", {})
+        metrics["quality_loop_pass"] = bool(quality_result.get("valid"))
+        metrics["quality_loop_status"] = quality_metrics.get("status", "missing")
+        metrics["quality_loop_prompt_count"] = int(quality_metrics.get("prompt_count") or 0)
+        metrics["quality_loop_blind_target_count"] = int(quality_metrics.get("blind_target_count") or 0)
+        metrics["quality_loop_generic_control_count"] = int(quality_metrics.get("generic_control_identified_count") or 0)
+        metrics["quality_loop_similar_role_count"] = int(quality_metrics.get("similar_role_distinguished_count") or 0)
+        metrics["quality_loop_total_score"] = int(quality_metrics.get("total_score") or 0)
+        for item in quality_result.get("issues", []):
+            if not isinstance(item, dict):
+                continue
+            add_issue(
+                issues,
+                "error" if level == "release" else "warning",
+                str(item.get("code") or "quality_loop.invalid"),
+                str(item.get("message") or "Persona Quality Loop v3 未通过"),
+                root / "tests" / "quality-loop.json",
+                root,
+            )
+
     target_met = False
     if persona_type in {"existing-character", "composite-character"}:
         targets = profile_targets or RESEARCH_PROFILES["一般"]
@@ -4237,6 +4437,11 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 len(mind_blocks) >= 6 and len(expr_blocks) >= 6
                 and len(subjective_memory_ids) >= 6
                 and quotation_policy_complete and verbosity_profile_complete
+            ))
+            and (persona_asset_version < 3 or (
+                len(behavior_blocks) >= 12
+                and metrics["behavior_function_coverage_complete"]
+                and metrics["quality_loop_pass"]
             ))
             and metrics["independent_quality_pass"]
             and (persona_type != "composite-character" or metrics["composite_work_coverage_complete"])
@@ -4278,6 +4483,11 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 and len(subjective_memory_ids) >= 6
                 and quotation_policy_complete and verbosity_profile_complete
             ))
+            and (persona_asset_version < 3 or (
+                len(behavior_blocks) >= 12
+                and metrics["behavior_function_coverage_complete"]
+                and metrics["quality_loop_pass"]
+            ))
             and metrics["independent_quality_pass"]
             and case_count >= 24
             and metrics["semantic_diversity_failures"] == 0
@@ -4300,6 +4510,11 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 len(mind_blocks) >= 6 and len(expr_blocks) >= 6
                 and len(subjective_memory_ids) >= 6
                 and quotation_policy_complete and verbosity_profile_complete
+            ))
+            and (persona_asset_version < 3 or (
+                len(behavior_blocks) >= 12
+                and metrics["behavior_function_coverage_complete"]
+                and metrics["quality_loop_pass"]
             ))
             and case_count >= 23
             and metrics["semantic_diversity_failures"] == 0
@@ -4350,7 +4565,7 @@ def validate_skill(root: Path, level: str) -> dict[str, object]:
                 root,
             )
         version_match = re.search(r"^CHECKER_CONTRACT_VERSION\s*=\s*(\d+)\s*$", response_checker_text, re.MULTILINE)
-        if level == "release" and (not version_match or int(version_match.group(1)) != 3):
+        if level == "release" and (not version_match or int(version_match.group(1)) != RESPONSE_CHECKER_CONTRACT_VERSION):
             add_issue(
                 issues,
                 "error",
@@ -4441,6 +4656,8 @@ def cmd_validate(args: argparse.Namespace) -> int:
             f"biography_categories={metrics['biography_categories']} "
             f"biography_baseline_complete={metrics['biography_baseline_complete']} "
             f"mind_rules={metrics['mind_rules']} expression_rules={metrics['expression_rules']} "
+            f"behavior_rules={metrics['behavior_rules']} behavior_functions={metrics['behavior_functions']} "
+            f"behavior_function_coverage_complete={metrics['behavior_function_coverage_complete']} "
             f"subjective_memory_entries={metrics['subjective_memory_entries']} analogy_domains={metrics['analogy_domains']} "
             f"quotation_policy_complete={metrics['quotation_policy_complete']} "
             f"verbosity_profile_complete={metrics['verbosity_profile_complete']} "
@@ -4452,6 +4669,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
             f"composite_work_card_share_max={metrics['composite_work_card_share_max']:.4f} "
             f"composite_detected_work_counts={';'.join(metrics['composite_detected_work_counts']) or 'none'} "
             f"independent_quality_pass={metrics['independent_quality_pass']} "
+            f"quality_loop_pass={metrics['quality_loop_pass']} quality_loop_status={metrics['quality_loop_status']} "
+            f"quality_loop_prompts={metrics['quality_loop_prompt_count']} "
+            f"quality_loop_blind={metrics['quality_loop_blind_target_count']} "
+            f"quality_loop_generic={metrics['quality_loop_generic_control_count']} "
+            f"quality_loop_similar={metrics['quality_loop_similar_role_count']} "
+            f"quality_loop_score={metrics['quality_loop_total_score']} "
             f"runtime_prompt_natural={metrics['runtime_prompt_natural_count']}/{metrics['runtime_prompt_count']} "
             f"runtime_repeated_fragment_max={metrics['runtime_repeated_fragment_max']} "
             f"evaluation_reason_unique_ratio={metrics['evaluation_reason_unique_ratio']} "
@@ -4468,6 +4691,17 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 
 def classify_loop_stage(error_codes: list[str]) -> tuple[str, str]:
+    quality_routes = (
+        ("quality_loop.layer.source", "RESEARCH", "按失败样本补充代表性来源、语境与行为功能覆盖，然后重新冻结人格并生成新隐藏题。"),
+        ("quality_loop.layer.behavior-model", "REDISTILL", "根据失败样本重写 BEHAV/MIND/EXPR 的区别性机制和近失对照，然后重新冻结人格。"),
+        ("quality_loop.layer.retrieval", "RETRIEVE", "修正选择器检索条件、工作迁移与证据组合，再用新运行记录重测。"),
+        ("quality_loop.layer.generation", "REGENERATE", "按 v3 response_contract 修复回答生成和可见信号实现，再重跑隐藏场景。"),
+        ("quality_loop.layer.runtime", "RUNTIME", "核对实际运行时加载、前缀、角色哈希与响应记录后重测。"),
+        ("quality_loop.layer.evaluation", "EVALUATE", "换用未参与生成的隔离上下文完成逐条盲评，不能由生成者自评。"),
+    )
+    for code, stage, action in quality_routes:
+        if code in error_codes:
+            return stage, action
     priorities = (
         (
             "RESEARCH",
@@ -4476,13 +4710,13 @@ def classify_loop_stage(error_codes: list[str]) -> tuple[str, str]:
         ),
         (
             "REDISTILL",
-            ("core_rule.", "voice.", "micro.", "mode.", "anti.", "scene."),
+            ("core_rule.", "voice.", "micro.", "mode.", "anti.", "scene.", "mind.", "expression.", "behavior."),
             "从可计数证据卡重新蒸馏规则，逐条修复证据映射和检索条件；禁止批量套话，完成后重新运行 iteration-gate。",
         ),
         (
             "TEST",
-            ("tests.",),
-            "实际运行失败或缺失的测试，保存结构化原始记录；失败则回到对应资料或规则阶段修复，再重新运行 iteration-gate。",
+            ("tests.", "quality_loop."),
+            "实际运行后冻结隐藏题、真实回答与隔离评估；失败必须按归因层修复后重新生成新一轮测试，不能改分数文件。",
         ),
         (
             "GENERATE",
@@ -4498,8 +4732,8 @@ def classify_loop_stage(error_codes: list[str]) -> tuple[str, str]:
 
 LOOP_STAGE_PREFIXES = {
     "RESEARCH": ("research.", "sources.", "dialogue.", "composite."),
-    "REDISTILL": ("core_rule.", "voice.", "micro.", "mode.", "anti.", "scene."),
-    "TEST": ("tests.",),
+    "REDISTILL": ("core_rule.", "voice.", "micro.", "mode.", "anti.", "scene.", "mind.", "expression.", "behavior."),
+    "TEST": ("tests.", "quality_loop."),
     "GENERATE": ("persona.", "content.", "biography.", "openai.", "skill."),
 }
 RESEARCH_IDENTITY_CODES = {
@@ -4790,6 +5024,118 @@ def cmd_completion_gate(args: argparse.Namespace) -> int:
     """Provide a deterministic final-answer gate for persona creation tasks."""
     root = Path(args.path).expanduser().resolve()
     return emit_gate(root, args.activation_status, "completion-gate", args.runtime, args.home)
+
+
+def _print_quality_progress(stage: str, completed: str, next_action: str) -> None:
+    print("PERSONA_BUILD_STATE=INCOMPLETE")
+    print("MUST_CONTINUE=true")
+    print("CREATE_LOOP_LOCK=active")
+    print("RESPONSE_MODE=CONTINUE_TOOL_LOOP")
+    print("TERMINAL_ALLOWED=false")
+    print("FINAL_REPORT_ALLOWED=false")
+    print("FEEDBACK_REQUIRED=true")
+    print(f"FEEDBACK_STAGE={stage}")
+    print(f"NEXT_FEEDBACK=阶段：{stage}；已完成：{completed}；下一步：{next_action}")
+
+
+def cmd_quality_init(args: argparse.Namespace) -> int:
+    try:
+        result = quality.init_run(
+            Path(args.path).expanduser().resolve(), args.generator_context_id, args.runtime,
+            args.runtime_mode, args.iteration, args.seed,
+        )
+        print(f"QUALITY_RUN_ID={result['run_id']}")
+        print(f"QUALITY_CHALLENGE={result['challenge_path']}")
+        print(f"PERSONA_BUNDLE_SHA256={result['persona_bundle_sha256']}")
+        print(f"PROMPT_COUNT={result['prompt_count']}")
+        print("LOOP_STAGE=RUNTIME-TEST")
+        _print_quality_progress("真实对话测试", "人格已冻结并在冻结后抽取隐藏场景", "让实际 Runtime 逐题生成连续回答，保存 v3 generation_trace 后运行 quality-record。")
+        print("NEXT_ACTION=不得预写答案或由静态样例代替；使用 challenge.json 的原始问题在实际 Runtime 中生成同一连续对话。")
+        return 0
+    except quality.QualityLoopError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 2
+
+
+def cmd_quality_record(args: argparse.Namespace) -> int:
+    try:
+        result = quality.record_responses(
+            Path(args.path).expanduser().resolve(), args.run_id,
+            Path(args.responses).expanduser().resolve(),
+            args.generic_context_id, args.similar_context_id,
+            Path(args.binding_receipt).expanduser().resolve() if args.binding_receipt else None,
+        )
+        print(f"QUALITY_RUN_ID={result['run_id']}")
+        print(f"RESPONSES_PATH={result['responses_path']}")
+        print(f"BLIND_BUNDLE_PATH={result['blind_bundle_path']}")
+        print(f"CHECKER_STATUS={result['checker']['status']}")
+        print("LOOP_STAGE=INDEPENDENT-EVALUATION")
+        _print_quality_progress("真实对话测试", "目标人格、通用助手和相似人物对照已来自不同上下文，实际回答及可见角色信号已通过可信检查器", "只把 blind-evaluation-bundle.json 交给未参与任何回答生成的隔离上下文逐条盲评，再运行 quality-evaluate。")
+        print("NEXT_ACTION=评估者不得读取 blind-evaluation-key.json；逐条把 C1/C2/C3 归为目标、通用和相似人物，并保存回答摘录、理由和失败归因。")
+        return 0
+    except quality.QualityLoopError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 2
+
+
+def cmd_quality_evaluate(args: argparse.Namespace) -> int:
+    try:
+        result = quality.evaluate_run(
+            Path(args.path).expanduser().resolve(), args.run_id,
+            Path(args.evaluation).expanduser().resolve(), args.evaluator_context_id,
+        )
+        evaluation = result.get("evaluation", {})
+        print(f"QUALITY_RUN_ID={result['run_id']}")
+        print(f"QUALITY_STATUS={result['status']}")
+        print(f"TOTAL_SCORE={evaluation.get('total_score', 0)}")
+        print(f"BLIND_TARGET_COUNT={evaluation.get('blind_target_count', 0)}")
+        print(f"GENERIC_CONTROL_IDENTIFIED_COUNT={evaluation.get('generic_control_identified_count', 0)}")
+        print(f"SIMILAR_ROLE_DISTINGUISHED_COUNT={evaluation.get('similar_role_distinguished_count', 0)}")
+        if result["status"] == "pass":
+            print("LOOP_STAGE=ENABLE")
+            _print_quality_progress("独立质量评估", "隐藏场景、角色辨识、相似角色区分、情绪价值和事实风险全部通过", "运行 release validate；通过后立即启用并核对 completion-gate。")
+            print("NEXT_ACTION=运行 validate --level release；若人格哈希仍一致，再 enable/register 并运行 completion-gate。")
+            return 0
+        status_result = quality.status(Path(args.path).expanduser().resolve())
+        stage, action = quality.route_status(status_result)
+        print(f"LOOP_STAGE={stage}")
+        print("FAILURE_LAYERS=" + ",".join(result.get("failure_layers", [])))
+        print("REPAIR_TARGETS=" + ",".join(result.get("repair_targets", [])))
+        _print_quality_progress("独立质量评估", "逐条盲评已完成但未达到人物效果门槛", action)
+        print(f"NEXT_ACTION={action} 修复后必须重新 quality-init，旧隐藏题与旧分数不得复用。")
+        return 1
+    except quality.QualityLoopError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 2
+
+
+def cmd_quality_status(args: argparse.Namespace) -> int:
+    result = quality.status(Path(args.path).expanduser().resolve())
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result["valid"] else 1
+    metrics = result["metrics"]
+    print(f"QUALITY_STATUS={metrics['status']}")
+    print(f"QUALITY_RUN_ID={metrics['run_id']}")
+    print(f"PROMPT_COUNT={metrics['prompt_count']}")
+    print(f"RUNTIME_GENERATION_PASS={str(metrics['runtime_generation_pass']).lower()}")
+    print(f"ISOLATED_EVALUATION_PASS={str(metrics['isolated_evaluation_pass']).lower()}")
+    print(f"BLIND_TARGET_COUNT={metrics['blind_target_count']}")
+    print(f"GENERIC_CONTROL_IDENTIFIED_COUNT={metrics['generic_control_identified_count']}")
+    print(f"SIMILAR_ROLE_DISTINGUISHED_COUNT={metrics['similar_role_distinguished_count']}")
+    print(f"TOTAL_SCORE={metrics['total_score']}")
+    if result["valid"]:
+        print("LOOP_STAGE=ENABLE")
+        print("NEXT_ACTION=质量循环已通过；运行 release validate，随后启用并核对 completion-gate。")
+        return 0
+    stage, action = quality.route_status(result)
+    print(f"LOOP_STAGE={stage}")
+    print("FAILURE_LAYERS=" + ",".join(metrics["failure_layers"]))
+    print("REPAIR_TARGETS=" + ",".join(metrics["repair_targets"]))
+    for item in result["issues"]:
+        print(f"ERROR {item['code']}: {item['message']}")
+    print(f"NEXT_ACTION={action}")
+    return 1
 
 
 def cmd_runtime_detect(args: argparse.Namespace) -> int:
@@ -5094,6 +5440,44 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_runtime_args(gate_parser)
     gate_parser.set_defaults(func=cmd_completion_gate)
+
+    quality_init_parser = subparsers.add_parser(
+        "quality-init", help="冻结人物资产并在冻结后生成 Persona Quality Loop v3 隐藏场景"
+    )
+    quality_init_parser.add_argument("path", help="角色人格 Skill 目录")
+    quality_init_parser.add_argument("--generator-context-id", required=True, help="实际生成回答的任务/上下文稳定标识")
+    quality_init_parser.add_argument("--runtime", required=True, choices=lifecycle.SUPPORTED_RUNTIMES)
+    quality_init_parser.add_argument("--runtime-mode", choices=tuple(sorted(quality.ALLOWED_RUNTIME_MODES)), default="staged-role")
+    quality_init_parser.add_argument("--iteration", type=int, default=1)
+    quality_init_parser.add_argument("--seed", default="", help="仅供可重复测试；正式运行省略以生成随机 nonce")
+    quality_init_parser.set_defaults(func=cmd_quality_init)
+
+    quality_record_parser = subparsers.add_parser(
+        "quality-record", help="记录实际 Runtime 的隐藏场景回答并现场重跑可信检查器"
+    )
+    quality_record_parser.add_argument("path", help="角色人格 Skill 目录")
+    quality_record_parser.add_argument("--run-id", required=True)
+    quality_record_parser.add_argument("--responses", required=True, help="实际连续回答 JSON")
+    quality_record_parser.add_argument("--generic-context-id", required=True, help="生成通用助手对照的隔离上下文 ID")
+    quality_record_parser.add_argument("--similar-context-id", required=True, help="生成相似人物近失对照的隔离上下文 ID")
+    quality_record_parser.add_argument("--binding-receipt", help="runtime-mode=installed-role 时必填")
+    quality_record_parser.set_defaults(func=cmd_quality_record)
+
+    quality_evaluate_parser = subparsers.add_parser(
+        "quality-evaluate", help="校验隔离盲评记录、重算质量分并输出修复归因"
+    )
+    quality_evaluate_parser.add_argument("path", help="角色人格 Skill 目录")
+    quality_evaluate_parser.add_argument("--run-id", required=True)
+    quality_evaluate_parser.add_argument("--evaluation", required=True, help="独立评估逐项 JSON")
+    quality_evaluate_parser.add_argument("--evaluator-context-id", required=True, help="不得与生成上下文相同")
+    quality_evaluate_parser.set_defaults(func=cmd_quality_evaluate)
+
+    quality_status_parser = subparsers.add_parser(
+        "quality-status", help="回读 v3 质量链、现场重跑检查器并给出下一修复层"
+    )
+    quality_status_parser.add_argument("path", help="角色人格 Skill 目录")
+    quality_status_parser.add_argument("--json", action="store_true")
+    quality_status_parser.set_defaults(func=cmd_quality_status)
 
     detect_parser = subparsers.add_parser("runtime-detect", help="确定性解析当前运行时的用户级路径")
     add_runtime_args(detect_parser)

@@ -87,23 +87,23 @@ else:
 
    > 资料范围已确定：将联网深度调研目标角色，优先收集官方或一手资料，以及可核查的对白、独白、叙述、访谈、文章、帖子或其他本人/角色原始表达，覆盖常用说法、日常反应、不同情绪与关系语境并建立来源索引；不会只依赖模型印象或用改写内容冒充原文。
 
-6. 先完整读取 [07-角色还原标准.md](references/07-角色还原标准.md)，再读取 [01-人格蒸馏规范.md](references/01-人格蒸馏规范.md)，建立来源清单并完成人物表达资产 v2。除角色核心、声纹、情绪与关系外，建立 `10-人物背景档案.md` 与 `11-心理机制与表达策略.md`：背景条目加入主观解释、情绪印记、联想触发、可迁移意象和愿谈程度；心理与表达规则分别使用 `MIND-` 和 `EXPR-`，逐条映射证据。事实、合理推导与未知严格分开。现实人物还要保留“模拟而非本人”的边界。
+6. 先完整读取 [07-角色还原标准.md](references/07-角色还原标准.md)，再读取 [01-人格蒸馏规范.md](references/01-人格蒸馏规范.md)，建立来源清单并完成人物表达资产 v3。除角色核心、声纹、情绪与关系外，建立 `10-人物背景档案.md`、`11-心理机制与表达策略.md` 和 `12-行为辨识模型.md`：背景条目加入主观解释、情绪印记、联想触发、可迁移意象和愿谈程度；心理与表达规则分别使用 `MIND-` 和 `EXPR-`；至少 12 条 `BEHAV-` 把触发转换成人物第一反应、核心取舍、关系动作、情绪轨迹、话语动作与两种回答形状，并写明通用助手近失样本和相似人物边界。每条逐项映射证据。事实、合理推导与未知严格分开。现实人物还要保留“模拟而非本人”的边界。
 7. 读取 [02-人格模板.md](references/02-人格模板.md)，把资料不足项标为 `缺失` 或 `合理推导`，不要用空泛形容词补齐。
 8. 处理原始表达时读取 [03-对白卡片规范.md](references/03-对白卡片规范.md)。按媒介收集本人或角色真实产生的逐字表达：动画与影视使用对白、独白、字幕、剧本或可靠转写；小说使用正文中的对白、内心独白、第一人称叙述或书信；现实人物使用可核查的访谈回答、演讲、博客、社交媒体、文章或书信。保留理解表达所需的语境，但不要求所有媒介都有连续前后话轮。原声音频和原始版式是可选增强。译制字幕只能作为参考译文。表达库禁止加入人物介绍、剧情摘要、第三方分析、合理推导、Persona.skill 补齐内容或预写工作改写。原文卡只标来源语义，不得写入工作标签。
 9. 读取 [04-工作场景迁移规范.md](references/04-工作场景迁移规范.md)，覆盖正常、失败、等待、分歧、认错、疲惫和高风险等工作事件。
 10. 名称闸门完成后，用 `scripts/persona_tool.py init` 从 `assets/角色人格模板/` 创建标准结构，并显式传入 `--name-choice 1|2|none` 与对应的 `--source-name`；`init` 拒绝没有名称闸门结果的调用。`init` 是不可交付的内部步骤；命令成功后不向用户停顿，立即将模板占位内容全部改成有来源类型的具体规则和示例。
-11. 读取 [05-生成与验证规范.md](references/05-生成与验证规范.md)，运行静态校验和真实场景测试。若数量或覆盖未达到目标，不得结束：必须扩大站点、资料类型、作品版本、语言、别名和查询词后继续收集。已有角色、跨作品集合和现实人物模拟必须达到至少 80 张已核验代表性原文卡（丰富档）才能进入蒸馏、启用或完成交付；`一般/稀缺/已穷尽` 只能保留为调研审计状态，不能当作完成例外。每次 `release` 校验失败都读取错误代码、修复、重跑，直到通过。
+11. 读取 [05-生成与验证规范.md](references/05-生成与验证规范.md)，运行静态校验和 Persona Quality Loop v3。若数量或行为功能覆盖未达到目标，不得结束：必须扩大站点、资料类型、作品版本、语言、别名和查询词后继续收集。已有角色、跨作品集合和现实人物模拟必须达到至少 80 张已核验代表性原文卡（丰富档）才能进入蒸馏、启用或完成交付；`一般/稀缺/已穷尽` 只能保留为调研审计状态，不能当作完成例外。人格冻结后运行 `quality-init` 抽取至少 24 个后冻结隐藏场景，由实际 Runtime 生成连续回答并用 `quality-record` 保存；再交给未参与生成的隔离上下文逐条盲评，用 `quality-evaluate` 重算分数。失败必须按 `source / behavior-model / retrieval / generation / runtime / evaluation` 归因返回对应资产修复，修改人格后旧题和旧分数自动失效。每次 `release` 校验失败都读取错误代码、修复、重新冻结并重跑，直到通过。
 12. 最终版本始终为正式版，不创建或报告其他版本等级。完成校验后按 [06-运行时适配规范.md](references/06-运行时适配规范.md) 判断能力：完整启用型运行 `enable` 并以 `enabled` 运行 `completion-gate`；Skill-only 型运行 `register` 并以 `registered` 运行门禁。只有门禁重新核对实际注册表、绑定回执或注册路径与角色哈希并输出 `TERMINAL_ALLOWED=true`，才能展示少量角色对话、保存位置、验证结果、调研状态和已知资料缺口。完整启用型立即在当前会话应用角色人格并写入用户级全局绑定；Skill-only 型明确报告需在会话中点名角色 Skill。完成报告本身也必须带 `<角色名>：` 前缀。无法可靠识别 Runtime 时要求用户只选择 Runtime，不猜测写入其他配置。
 
 ## 更新已有角色
 
 更新请求不重复询问名称；从现有角色 Skill 读取已经确定的显示名、原角色名和作用域。先用最新版 `validate --level release` 审计，再按错误代码补齐，不能只替换 `SKILL.md`：
 
-1. 人物资产 v1 可先运行 `python scripts/migrate_asset_v2.py <角色Skill绝对路径>` 做结构迁移；该命令只补显式字段、v2 文件骨架和最新运行脚本，不替人物编造心理。迁移后必须继续重蒸馏并重测，不能把机械迁移当完成。
+1. 人物资产 v1 可先运行 `python scripts/migrate_asset_v2.py <角色Skill绝对路径>` 补 v2 显式字段，再运行 `python scripts/migrate_asset_v3.py <角色Skill绝对路径>` 建立 v3 行为模型骨架；v2 角色直接运行后一条。迁移命令只补字段、模板和最新运行脚本，不替人物编造心理，并明确返回 `MIGRATION_STATE=INCOMPLETE`。迁移后必须继续重蒸馏并重测，不能把机械迁移当完成。
 2. 保留可核查的原始表达卡、来源与人物背景，不把旧工作改写升级成原文。
 3. 用当前模板同步 `scripts/select_dialogues.py` 和 `scripts/check_response.py` 的运行能力；合并而非覆盖用户自定义规则。
 4. 把旧式 `卡片=>字段` 映射补成 `卡片=>字段=具体观察`；根据原始资料新增六类 `MICRO-`，不得用模型想象填充。
-5. 重新运行场景检索、生成准备度、连续对话、单条反角色、批量退化和独立质量评估。人物资产 v2 使用至少 20 条同一真实连续对话；任一回答为 `review/fail`、综合低于 85/100、角色还原低于 26/30、情绪价值低于 16/20、主动表达低于 12/15、角色式思考与解释低于 12/15、连续关系低于 8/10，或事实与风险不是 10/10 时，不得说“更新已生效”。
+5. 重新运行场景检索、生成准备度、连续对话、单条反角色、批量退化和独立质量评估。人物资产 v3 使用至少 24 条后冻结隐藏场景实际连续回答；每条质量轨迹都必须引用回答中的逐字可见人物信号，不能用布尔值自证。任一回答为 `review/fail`、综合低于 85/100、角色还原低于 26/30、情绪价值低于 16/20、主动表达低于 12/15、角色式思考与解释低于 12/15、连续关系低于 8/10，或事实与风险不是 10/10 时，不得说“更新已生效”。v1/v2 角色继续兼容，但迁移到 v3 后才能使用新质量闭环。
 6. 若角色当前处于启用状态，人物哈希变化会使旧回执失效；正式校验通过后重新启用原角色，无需卸载重装。
 
 ## 调研与来源
@@ -151,11 +151,11 @@ else:
 
 1. 固定事实、结果、风险和待确认事项。
 2. 判断工作事件、可观察的用户状态、交流目的和风险等级；同时记录用户最后一个具体关注点、仍未闭合的话题和上一条回答的形状。三者作为 `last_user_focus`、`open_thread`、`previous_shape` 传给选择器。没有必要追问时允许陈述后自然停住。
-3. 读取角色核心、`10-人物背景档案.md` 常驻身份基线和 `11-心理机制与表达策略.md` 使用规则，把角色身份、经历、价值冲突、关系意图、解释习惯与知识边界作为回答底座。先锁定事实与风险，再判断用户情绪和关系；以 `--concept` 提供当前概念，按需检索 0–2 条 `BIO-`、命中 `MIND- / EXPR-` 和少量对白。脚本不可用时才使用索引和 `rg` 回退；绝不全量加载。
+3. 读取角色核心、`10-人物背景档案.md` 常驻身份基线、`11-心理机制与表达策略.md` 和 `12-行为辨识模型.md`，把角色身份、经历、价值冲突、关系意图、解释习惯、区别性行为与知识边界作为回答底座。先锁定事实与风险，再判断用户情绪和关系；以 `--concept` 提供当前概念，按需检索 0–2 条 `BIO-`、命中 `MIND- / EXPR- / BEHAV-` 和少量对白。脚本不可用时才使用索引和 `rg` 回退；绝不全量加载。
 4. 只按原作话语行为、触发、互动功能、互动位置、关系、情绪与主动性召回原文；问候、应答、感谢、道歉、惊讶或告别另传入 `micro_function`。分别检查选择器返回的 `match_confidence`、`evidence_confidence`、综合 `confidence` 和 `composition_guidance.generation_readiness`。前三者只评价卡片召回，绝不能写成“回答高置信地像角色”。生成准备度为 low 时不得发送角色化成品，也不能用一张相关卡给通用回答背书。只使用 `related_rules` 中通过检索条件和逐卡观察映射的 `CORE-`、`VOICE-`、`MICRO-`、`MODE-` 与 `ANTI-` 规则。
-5. 按四个槽位组合回答：当前匹配卡提供即时反应；微互动或声纹规则提供开场、断句、接话和收束；角色核心或情绪关系规则提供立场与主动性；反角色规则负责删掉客服及项目经理骨架。跨证据单元读取至少两张风格支持卡，但不把它们误报成当前场景召回。任一槽位不能由“通用最佳实践”或模型印象代替。
+5. 先执行选择器返回的 `response_contract`：它必须命中 `BEHAV-`，给出人物第一反应、核心取舍、关系动作、情绪轨迹、话语动作序列、至少两种回答形状、最小可见信号、通用助手近失样本和相似人物边界。然后组合证据槽：当前匹配卡提供即时反应；微互动或声纹规则提供开场、断句、接话和收束；角色核心、心理或情绪关系规则提供立场与主动性；表达规则提供人物式解释、联想和篇幅；反角色规则删掉客服及项目经理骨架。没有 ready 的行为合同，或两个最小可见信号无法落到实际回答中时，生成准备度必须是 low。
 6. 内部生成至少两个事实相同、形状不同的候选。候选必须先回应 `last_user_focus` 并延续 `open_thread`，且避开 `previous_shape`；在短答、半句转折、直接判断、叙述、追问和自然收束之间按角色证据变化。先删除“先确认—再处理—我们推进”“结论—原因—下一步”等默认骨架；不能只在通用回答开头加一句角色反应，也不能为了显得完整强行补问题或下一步。
-7. 按选择器的 `performance_guidance / background_callbacks / expression_guidance / traceability` 先生成两个形状不同的候选，再依人物档案检查。保留近期对白与背景编号、关系阶段、情绪原因和未消退分歧。角色感不能靠前缀、`搭档`、单一口头禅或作品名支撑。单条长回复运行 `scripts/check_response.py`；一组带运行轨迹的测试回答必须运行 `--batch-file`，检查人物存在、情绪回应、主动表达、背景与引文追溯、篇幅适配及结构退化。
+7. 按选择器的 `response_contract / performance_guidance / background_callbacks / expression_guidance / traceability` 先生成两个形状不同的候选，再依人物档案检查。保留近期对白与背景编号、关系阶段、情绪原因和未消退分歧。角色感不能靠前缀、`搭档`、单一口头禅或作品名支撑。质量测试的 `generation_trace` 必须写 `contract_version=3`、真实 `behavior_rule_ids`、`generic_near_miss_avoided`、`similar_role_boundary`，以及至少两个含 `kind / rule_id / excerpt` 的 `visible_character_signals`；每个 excerpt 必须逐字存在于实际回复。单条长回复运行 `scripts/check_response.py`；一组带运行轨迹的测试回答必须运行 `--batch-file`，检查人物存在、情绪回应、主动表达、背景与引文追溯、篇幅适配、行为机制覆盖及结构退化。
 8. 检查是否遗漏前缀、改变事实、隐藏失败、降低风险、误引来源、低生成准备度硬发、低置信度硬套卡片或过度表演。
 
 高风险时切换到角色真实的认真、警觉、愤怒或保护模式，不切回通用安全助手口吻。去掉角色名、前缀、口头禅和作品专有名词后若无法识别角色，重新生成。
@@ -189,6 +189,10 @@ python scripts/persona_tool.py runtime-detect --runtime <runtime-id>
 python scripts/persona_tool.py init --name "角色显示名" --source-name "原角色名" --name-choice 1 --slug role-slug --output <当前 Runtime skills/persona-role-slug>
 python scripts/persona_tool.py research-gate <角色 Skill 目录>
 python scripts/persona_tool.py iteration-gate <角色 Skill 目录> --activation-status pending
+python scripts/persona_tool.py quality-init <角色 Skill 目录> --generator-context-id <实际任务ID> --runtime <runtime>
+python scripts/persona_tool.py quality-record <角色 Skill 目录> --run-id <run-id> --responses <实际运行回答与对照.json> --generic-context-id <通用助手隔离任务ID> --similar-context-id <相似人物隔离任务ID>
+python scripts/persona_tool.py quality-evaluate <角色 Skill 目录> --run-id <run-id> --evaluation <隔离盲评.json> --evaluator-context-id <隔离任务ID>
+python scripts/persona_tool.py quality-status <角色 Skill 目录>
 python scripts/persona_tool.py validate <角色 Skill 目录> --level release
 python scripts/persona_tool.py enable <角色 Skill 目录> --runtime <runtime> [--alias "别名"]
 python scripts/persona_tool.py register <角色 Skill 目录> --runtime <runtime> [--alias "别名"]
@@ -202,16 +206,16 @@ python scripts/persona_tool.py reset-memory <稳定 ID|显示名|别名> --runti
 python scripts/persona_tool.py delete <稳定 ID|显示名|别名> --runtime <runtime> --yes
 ```
 
-`name-gate` 是创建流程的第一道硬闸门：有原名时只接受 1/2 选择，无原名时只接受用户直接设定的名称；它未完成时禁止调用 `init`。`init` 还会强制核对 `--name-choice`、`--source-name` 和显示名的一致性，拒绝绕过名称选择；它拒绝覆盖已有目录，生成 ASCII 小写稳定 ID `persona-<slug>`，并明确返回 `MUST_CONTINUE=true` 与 `RESPONSE_MODE=CONTINUE_TOOL_LOOP`。`research-gate` 只校验原始资料、来源、语境和调研扩展，阻止用薄弱语料提前批量生成规则与测试。`iteration-gate` 是后续创建循环控制器：只返回当前阶段的根错误代码与下一动作，不替 Agent 执行调研或修复；门禁只要返回 `CREATE_LOOP_LOCK=active` 就不得以进度消息结束当前轮。`validate` 会核对静态结构、逐项独立评测记录、真实对话数据哈希、检查器输出和独立质量门槛，但不能替 Agent 生成真实测试。完整启用型使用 `enable` 写注册表、全局绑定和可验证回执；Skill-only 型使用 `register` 并以 `registered` 运行门禁。`completion-gate` 会再次执行 release 校验并检查绑定回执或注册路径与哈希；只有同时输出 `TERMINAL_ALLOWED=true`、`RESPONSE_MODE=FINAL_REPORT` 和 `CREATE_LOOP_LOCK=released` 才允许最终交付；用户明确要求“只创建不启用”时才可传 `--activation-status not-requested`。
+`name-gate` 是创建流程的第一道硬闸门：有原名时只接受 1/2 选择，无原名时只接受用户直接设定的名称；它未完成时禁止调用 `init`。`init` 还会强制核对 `--name-choice`、`--source-name` 和显示名的一致性，拒绝绕过名称选择；它拒绝覆盖已有目录，生成 ASCII 小写稳定 ID `persona-<slug>`，并明确返回 `MUST_CONTINUE=true` 与 `RESPONSE_MODE=CONTINUE_TOOL_LOOP`。`research-gate` 只校验原始资料、来源、语境和调研扩展，阻止用薄弱语料提前批量生成规则与测试。`iteration-gate` 是后续创建循环控制器。`quality-init` 在人格冻结后抽取隐藏场景；`quality-record` 保存实际 Runtime 回答并现场重跑可信检查器；`quality-evaluate` 只接受不同上下文的逐条盲评并自行重算全部分数；`quality-status` 回读哈希、现场检查结果和失败归因。任何人格文件修改都会使旧质量链失效。完整启用型使用 `enable` 写注册表、全局绑定和可验证回执；Skill-only 型使用 `register` 并以 `registered` 运行门禁。`completion-gate` 会再次执行 release 校验并检查质量链、绑定回执或注册路径与哈希；只有同时输出 `TERMINAL_ALLOWED=true`、`RESPONSE_MODE=FINAL_REPORT` 和 `CREATE_LOOP_LOCK=released` 才允许最终交付；用户明确要求“只创建不启用”时才可传 `--activation-status not-requested`。
 
 生成的角色 Skill 使用自己的选择器按场景召回少量卡片：
 
 ```text
-python scripts/select_dialogues.py --task-state failed --user-state tired --speech-act reassure --trigger peer_failure --interaction comfort --position reply --emotion caring --relation familiar --risk medium --source-language ja-JP --language zh-CN --limit 5 --turns-since-presence 3 --turns-since-initiative 4 --last-user-focus "第三次失败" --open-thread "用户开始怀疑自己" --previous-shape reassurance --exclude CHISATO-0042
+python scripts/select_dialogues.py --task-state failed --behavior-function reassure --user-state tired --speech-act reassure --trigger peer_failure --interaction comfort --position reply --emotion caring --relation familiar --risk medium --source-language ja-JP --language zh-CN --limit 5 --turns-since-presence 3 --turns-since-initiative 4 --last-user-focus "第三次失败" --open-thread "用户开始怀疑自己" --previous-shape reassurance --exclude CHISATO-0042 --format json
 ```
 
 如果环境没有 Python，手工复制 `assets/角色人格模板/` 并逐项执行 [05-生成与验证规范.md](references/05-生成与验证规范.md)；把静态校验状态写为 `未运行：Python 不可用`，不要当作通过。
 
 ## 完成交付
 
-只有同时满足以下条件才称为“完成”：生成物位于当前 Runtime 的用户 Skills 目录；没有未解释占位符；静态校验通过；已有角色、跨作品集合和现实人物模拟至少有 80 张已核验代表性原文卡并达到丰富档；人物资产 v2 含至少 6 条 `MIND-`、6 条 `EXPR-`、可调用的主观背景记忆、完整引文与篇幅政策；表达库与工作层分离且无批量模板标注；核心、声纹、微互动、情绪、心理、表达和反角色规则均可追溯；选择器只返回真正匹配的 0–6 张卡并另外给出人物表演、背景回调、表达与追溯指导；每轮接住上一句话并表现人物自己的判断、情绪或关系动作，不虚构现实画面；同一份至少 20 条真实连续对话同时通过单条、批量和独立质量评估，综合评分至少 85/100，角色还原至少 26/30、情绪价值至少 16/20、主动表达至少 12/15、角色式思考与解释至少 12/15、连续关系至少 8/10、事实与风险必须 10/10；去名盲测至少 12 个场景通过 10 个，相似角色区分率至少 80%；完整启用或注册回执有效，最后一次 `completion-gate` 输出 `TERMINAL_ALLOWED=true`。旧版人物资产继续可读并得到迁移提醒，不因母 Skill 更新立即失效。
+只有同时满足以下条件才称为“完成”：生成物位于当前 Runtime 的用户 Skills 目录；没有未解释占位符；静态校验通过；已有角色、跨作品集合和现实人物模拟至少有 80 张已核验代表性原文卡并达到丰富档；人物资产 v3 含至少 6 条 `MIND-`、6 条 `EXPR-`、12 条覆盖全部行为功能的 `BEHAV-`、可调用的主观背景记忆、完整引文与篇幅政策；表达库与工作层分离且无批量模板标注；核心、声纹、微互动、情绪、心理、表达、行为辨识和反角色规则均可追溯；选择器只返回真正匹配的 0–6 张卡并给出 ready 的 `response_contract`；每轮接住上一句话并实际表现人物自己的判断、情绪或关系动作以及人物式表达信号；至少 24 条人格冻结后才抽取的日常与工作隐藏场景由实际 Runtime 连续生成，回答内可见信号逐字可核对，并由未参与生成的隔离上下文盲评；综合评分至少 85/100，角色还原至少 26/30、情绪价值至少 16/20、主动表达至少 12/15、角色式思考与解释至少 12/15、连续关系至少 8/10、事实与风险必须 10/10；盲辨至少 24 条通过 20 条，相似角色区分至少 24 条通过 20 条；人格哈希、场景哈希、实际回答哈希、检查器输出和评估记录全部当前有效；完整启用或注册回执有效，最后一次 `completion-gate` 输出 `TERMINAL_ALLOWED=true`。旧版人物资产继续可读并得到迁移提醒，不因母 Skill 更新立即失效。

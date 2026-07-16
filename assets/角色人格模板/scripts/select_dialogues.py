@@ -15,7 +15,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 CARD_HEADING_RE = re.compile(
     r"^##\s+([A-Z0-9][A-Z0-9-]*-\d{4})\s*$", re.MULTILINE | re.IGNORECASE
 )
-RULE_HEADING_RE = re.compile(r"^###\s+((?:CORE|VOICE|MICRO|MODE|ANTI|MIND|EXPR)-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+RULE_HEADING_RE = re.compile(r"^#{2,3}\s+((?:CORE|VOICE|MICRO|MODE|ANTI|MIND|EXPR|BEHAV)-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 BIO_HEADING_RE = re.compile(r"^###\s+(BIO-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 SCENE_HEADING_RE = re.compile(r"^##\s+([a-z][a-z-]*)\s+\|", re.MULTILINE)
 TAG_RE = re.compile(r"\b([a-z_]+)\s*=\s*([^;；]+)", re.IGNORECASE)
@@ -47,6 +47,12 @@ LOCATOR_ONLY_CONTEXT_MARKERS = (
     "以话数与场景标题定位", "资料说明可定位", "由同一官方场景条目定位",
     "见来源页", "见来源索引", "官方场景页以", "定位（", "定位(",
 )
+BEHAVIOR_BY_WORK_SCENE = {
+    "start": "connect", "clarify": "clarify", "progress": "explain", "waiting": "wait",
+    "issue": "explain", "failed": "reassure", "mistake": "admit-error", "tired": "reassure",
+    "disagree": "disagree", "risk": "warn", "decision": "clarify", "blocked": "wait",
+    "milestone": "celebrate", "complete": "celebrate", "close": "close",
+}
 
 
 @dataclass(frozen=True)
@@ -96,6 +102,14 @@ class WorkRoute:
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig")
+
+
+def asset_version(root: Path) -> int:
+    path = root / "references" / "01-角色核心.md"
+    if not path.is_file():
+        return 1
+    raw = field_value(read_text(path), "人格资产版本")
+    return int(raw) if raw.isdigit() else 1
 
 
 def split_values(value: str) -> Set[str]:
@@ -262,6 +276,14 @@ def effective_query(args: argparse.Namespace, route: WorkRoute) -> Dict[str, str
     result["concept"] = args.concept.strip().lower()
     result["desired_length"] = args.desired_length
     result["expression_strength"] = args.expression_strength
+    result["behavior_function"] = (
+        args.behavior_function.strip().lower()
+        or BEHAVIOR_BY_WORK_SCENE.get(route.scene_id, "")
+        or ({
+            "greeting": "connect", "acknowledgement": "connect", "gratitude": "connect",
+            "apology": "admit-error", "surprise": "connect", "closing": "close",
+        }.get(result["micro_function"], ""))
+    )
     return result
 
 
@@ -424,6 +446,7 @@ def related_rules(
         "anti": (root / "references" / "09-反角色对照.md", "ANTI-"),
         "mind": (root / "references" / "11-心理机制与表达策略.md", "MIND-"),
         "expression": (root / "references" / "11-心理机制与表达策略.md", "EXPR-"),
+        "behavior": (root / "references" / "12-行为辨识模型.md", "BEHAV-"),
     }
     result: Dict[str, List[Dict[str, object]]] = {key: [] for key in references}
     query_has_semantics = any(query.get(key) for key in WEIGHTS)
@@ -452,7 +475,14 @@ def related_rules(
                 for field in ("触发", "适用触发", "比喻或意象来源", "经历回调", "主动表达习惯")
             )
             concept_match = bool(concept and any(token in concept_fields for token in split_values(concept)))
-            if key in {"mind", "expression"}:
+            behavior_function = query.get("behavior_function", "")
+            if key == "behavior":
+                eligible = bool(
+                    mappings
+                    and behavior_function
+                    and field_value(block, "行为功能").strip().lower() == behavior_function
+                )
+            elif key in {"mind", "expression"}:
                 eligible = bool(matched_ids or concept_match)
             elif key == "micro" and query.get("micro_function"):
                 # A micro rule is itself the audited mapping from a surface
@@ -497,9 +527,9 @@ def prioritize_rule_evidence(
     cards_by_id = {card.card_id: card for card in cards}
     matches_by_id = {item.card.card_id: item for item in matches}
     priority_ids: List[str] = []
-    for group in ("micro", "mind", "expression"):
+    for group in ("behavior", "micro", "mind", "expression"):
         for rule in rules.get(group, []):
-            if group != "micro" and rule.get("concept_match") is not True:
+            if group not in {"behavior", "micro"} and rule.get("concept_match") is not True:
                 continue
             for raw_id in rule.get("supporting_card_ids", []):
                 card_id = str(raw_id)
@@ -683,6 +713,59 @@ def expression_guidance(
     }
 
 
+def behavior_contract(rules: Dict[str, List[Dict[str, object]]], query: Dict[str, str]) -> Dict[str, object]:
+    contracts: List[Dict[str, object]] = []
+    for rule in rules.get("behavior", []):
+        block = str(rule["content"])
+        contracts.append({
+            "rule_id": rule["rule_id"],
+            "behavior_function": field_value(block, "行为功能"),
+            "first_reaction": field_value(block, "第一反应"),
+            "core_tradeoff": field_value(block, "核心取舍"),
+            "relationship_action": field_value(block, "对用户的关系动作"),
+            "emotion_trajectory": field_value(block, "情绪轨迹"),
+            "speech_act_sequence": field_value(block, "话语动作序列"),
+            "candidate_shapes": sorted(split_values(field_value(block, "形状候选"))),
+            "visible_character_signals": sorted(split_values(field_value(block, "可见角色信号"))),
+            "minimum_realization": field_value(block, "最小实现"),
+            "strength_escalation": field_value(block, "强度升级"),
+            "generic_near_miss": field_value(block, "通用助手近失样本"),
+            "similar_role_near_miss": field_value(block, "相似人物近失样本"),
+            "similar_role_boundary": field_value(block, "区别性边界"),
+            "forbidden_and_fact_boundary": field_value(block, "禁用与事实边界"),
+            "connected_assets": field_value(block, "连接资产"),
+            "failure_attribution": field_value(block, "失败归因"),
+            "supporting_card_ids": list(rule.get("supporting_card_ids", [])),
+        })
+    primary = contracts[0] if contracts else {}
+    ready = bool(
+        primary
+        and len(primary.get("candidate_shapes", [])) >= 2
+        and len(primary.get("visible_character_signals", [])) >= 2
+        and primary.get("generic_near_miss")
+        and primary.get("similar_role_boundary")
+    )
+    return {
+        "contract_version": 3,
+        "ready": ready,
+        "behavior_function": query.get("behavior_function", ""),
+        "behavior_rule_ids": [item["rule_id"] for item in contracts],
+        "contracts": contracts,
+        "required_visible_slots": [
+            "至少一个人物判断、情绪、关系或主动性片段",
+            "至少一个修辞、节奏或背景联想片段",
+        ],
+        "generation_trace_contract": {
+            "contract_version": 3,
+            "behavior_rule_ids": "必须引用真实 BEHAV-编号",
+            "visible_character_signals": "至少两项；每项含 kind/rule_id/excerpt，excerpt 逐字存在于实际回复",
+            "generic_near_miss_avoided": "说明本回答如何避开命中的通用助手近失样本",
+            "similar_role_boundary": "说明本回答采用了哪一条目标人物区别性边界",
+        },
+        "failure_rule": "没有 ready 的行为合同，或无法在回答中实现两个可见槽位时，generation_readiness 必须为 low",
+    }
+
+
 def traceability_payload(
     selected: Sequence[Match], rules: Dict[str, List[Dict[str, object]]], callbacks: Sequence[Dict[str, object]],
 ) -> Dict[str, object]:
@@ -691,6 +774,7 @@ def traceability_payload(
         "core_rule_ids": [str(item["rule_id"]) for item in rules.get("core", [])],
         "mind_rule_ids": [str(item["rule_id"]) for item in rules.get("mind", [])],
         "expression_rule_ids": [str(item["rule_id"]) for item in rules.get("expression", [])],
+        "behavior_rule_ids": [str(item["rule_id"]) for item in rules.get("behavior", [])],
         "background_ids": [str(item["bio_id"]) for item in callbacks],
         "source_ids": sorted({
             source_id
@@ -705,7 +789,7 @@ def traceability_payload(
 
 def composition_guidance(
     cards: Sequence[Card], selected: Sequence[Match], rules: Dict[str, List[Dict[str, object]]],
-    query: Dict[str, str],
+    query: Dict[str, str], require_behavior: bool = False,
 ) -> Dict[str, object]:
     cards_by_id = {card.card_id: card for card in cards}
     selected_ids = {item.card.card_id for item in selected}
@@ -784,6 +868,7 @@ def composition_guidance(
         "stance_or_relation": bool(rules.get("core") or rules.get("modes")),
         "character_mind": bool(rules.get("mind")) if query.get("concept") else True,
         "expression_strategy": bool(rules.get("expression")) if query.get("concept") else True,
+        "behavior_contract": bool(rules.get("behavior")) if require_behavior else True,
         "anti_pattern_check": bool(rules.get("anti")),
         "cross_unit_style_support": len(style_exemplars) >= 2,
     }
@@ -796,6 +881,8 @@ def composition_guidance(
         warnings.append("跨证据单元的声纹示例不足；召回置信度不能当作成品角色还原度")
     if not rules.get("anti"):
         warnings.append("没有命中反角色规则；发送前必须额外检查项目经理与客服骨架")
+    if require_behavior and not rules.get("behavior"):
+        warnings.append("人物资产 v3 没有命中 BEHAV 行为合同；不得用前缀、口头禅或通用回答补位")
     return {
         "generation_readiness": readiness,
         "retrieval_is_not_fidelity": True,
@@ -805,6 +892,7 @@ def composition_guidance(
         "style_exemplars": style_exemplars,
         "warnings": warnings,
         "assembly_order": [
+            "先从 BEHAV 合同确定第一反应、核心取舍、关系动作、情绪轨迹和区别性边界",
             "从当前匹配卡提取角色面对触发时的即时反应",
             "从微互动或声纹规则提取开场、断句、接话和收束方式",
             "从角色核心或情绪关系规则确定立场与主动性",
@@ -984,6 +1072,7 @@ def json_output(
     retrieval: Dict[str, object], route: WorkRoute, delivery: Dict[str, object],
     composition: Dict[str, object], query: Dict[str, str], callbacks: Sequence[Dict[str, object]],
     performance: Dict[str, object], expression: Dict[str, object], traceability: Dict[str, object],
+    response_contract: Dict[str, object],
 ) -> str:
     payload = {
         "library_cards": card_count,
@@ -995,6 +1084,7 @@ def json_output(
         "background_callbacks": list(callbacks),
         "expression_guidance": expression,
         "traceability": traceability,
+        "response_contract": response_contract,
         "selected": [
             {
                 "card_id": item.card.card_id,
@@ -1043,6 +1133,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--risk", default="")
     parser.add_argument("--language", default="", help="输出语言；不用于过滤原语言语料")
     parser.add_argument("--concept", default="", help="当前工作概念，如负担、等待、风险、返工、信任")
+    parser.add_argument(
+        "--behavior-function", default="",
+        choices=("", "connect", "explain", "reassure", "disagree", "admit-error", "celebrate", "wait", "warn", "clarify", "refuse", "identity", "close"),
+        help="人物资产 v3 的回答行为功能；省略时由工作场景或微互动推导",
+    )
     parser.add_argument("--desired-length", choices=("auto", "brief", "normal", "extended"), default="auto")
     parser.add_argument("--expression-strength", choices=("auto", "light", "normal", "strong"), default="auto")
     parser.add_argument("--source-language", default="", help="仅在需要时限制原文语言")
@@ -1091,11 +1186,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ]
     selected = choose_matches(matches, min(args.limit, len(matches)), args.allow_low_evidence)
     rules = related_rules(root, selected, query)
-    if args.micro_function or args.concept:
+    if args.micro_function or args.concept or query.get("behavior_function"):
         selected = prioritize_rule_evidence(cards, matches, rules, min(args.limit, len(cards)))
         rules = related_rules(root, selected, query)
     retrieval = retrieval_diagnostics(selected, matches, query)
-    composition = composition_guidance(cards, selected, rules, query)
+    response_contract = behavior_contract(rules, query)
+    composition = composition_guidance(cards, selected, rules, query, asset_version(root) >= 3)
     callbacks = background_callbacks(root, args.concept, parse_excludes(args.recent_background_id))
     performance = performance_guidance(
         rules, callbacks, args.desired_length, args.expression_strength, args.risk,
@@ -1109,7 +1205,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.format == "json":
         print(json_output(
             selected, len(cards), rules, retrieval, route, delivery, composition, query,
-            callbacks, performance, expression, traceability,
+            callbacks, performance, expression, traceability, response_contract,
         ), end="")
     elif args.format == "ids":
         print("\n".join(item.card.card_id for item in selected))

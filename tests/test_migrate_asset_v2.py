@@ -1,4 +1,6 @@
 import importlib.util
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -70,6 +72,28 @@ class MigrateAssetV2Tests(unittest.TestCase):
             self.assertIn("--exclude EXAMPLE-0001", synced_skill)
             self.assertIn("--source-language zh-CN", synced_skill)
             self.assertTrue((role / "scripts" / "select_dialogues.py").is_file())
+
+            migrate_v3 = ROOT / "scripts" / "migrate_asset_v3.py"
+            first_v3 = subprocess.run(
+                [sys.executable, str(migrate_v3), str(role), "--no-sync-runtime-assets"],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(first_v3.returncode, 0, first_v3.stdout + first_v3.stderr)
+            self.assertIn("MIGRATION_STATE=INCOMPLETE", first_v3.stdout)
+            self.assertIn("MUST_CONTINUE=true", first_v3.stdout)
+            v3_snapshot = {
+                "core": (references / "01-角色核心.md").read_text(encoding="utf-8"),
+                "behavior": (references / "12-行为辨识模型.md").read_text(encoding="utf-8"),
+            }
+            second_v3 = subprocess.run(
+                [sys.executable, str(migrate_v3), str(role), "--no-sync-runtime-assets"],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(second_v3.returncode, 0, second_v3.stdout + second_v3.stderr)
+            self.assertEqual(v3_snapshot["core"], (references / "01-角色核心.md").read_text(encoding="utf-8"))
+            self.assertEqual(v3_snapshot["behavior"], (references / "12-行为辨识模型.md").read_text(encoding="utf-8"))
+            self.assertIn("- 人格资产版本：3", v3_snapshot["core"])
+            self.assertIn("BEHAV-01", v3_snapshot["behavior"])
 
 
 if __name__ == "__main__":

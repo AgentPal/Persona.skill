@@ -195,7 +195,7 @@ def build_fixture(
         for old, new in replacements.items():
             text = text.replace(old, new)
         text = re.sub(r"- 人格来源类型：\[待填写[^\]]*\]", f"- 人格来源类型：{persona_type}", text)
-        text = re.sub(r"- 人格资产版本：2", f"- 人格资产版本：{asset_version}", text)
+        text = re.sub(r"- 人格资产版本：\d+", f"- 人格资产版本：{asset_version}", text)
         text = re.sub(
             r"- 原作媒介：\[待填写[^\]]*\]",
             f"- 原作媒介：{selected_medium}",
@@ -208,7 +208,7 @@ def build_fixture(
     cases_path = target / "references" / "07-验证用例.md"
     cases_text = cases_path.read_text(encoding="utf-8")
     biography_case_last = 12 if persona_type in {"existing-character", "composite-character", "real-person-simulation"} else 8
-    runtime_sample_count = 20 if asset_version >= 2 else 12
+    runtime_sample_count = 24 if asset_version >= 3 else (20 if asset_version >= 2 else 12)
     fidelity_cases = {
         "CASE-18": """## CASE-18 | 去名盲测
 
@@ -355,6 +355,13 @@ def build_fixture(
             ("构建终于结束了。", "总算落地了。先别急着庆功，把产物哈希和测试结果对上；对上以后，这口气才算真能松。"),
             ("我们之间现在算什么关系？", "算一起扛过几次麻烦、也能互相挑错的同伴。不是谁哄着谁，是话能说重，事还愿意一起做。"),
         ])
+    if asset_version >= 3:
+        runtime_pairs.extend([
+            ("我不同意你的判断。", "那就把分歧摆明：我守的是可回滚，你守的是眼前速度。话可以顶着说，退路不能赌掉。"),
+            ("你能解释得更像你自己一点吗？", "能。别把缓存想成听话的影子，它更像一本没及时换页的旧账；数据库已经记上新数，读的人却还翻在前一页。"),
+            ("这件事先别继续。", "停在这里。没有新动作，也不拿一句漂亮话假装事情已经收尾。"),
+            ("现在可以告别了。", "那就收灯。今天留下的那点乱，不必跟着你走到门外。"),
+        ])
     runtime_samples = [
         {
             "conversation_id": "fixture-conversation-001",
@@ -375,6 +382,29 @@ def build_fixture(
                     "desired_length": "brief" if index in {3, 15} else "auto",
                     "response_shape": f"fixture-shape-{index:02d}",
                     "exact_quotes": [],
+                    **({
+                        "contract_version": 3,
+                        "behavior_rule_ids": [f"BEHAV-{((index - 1) % 12) + 1:02d}"],
+                        "visible_character_signals": [
+                            {
+                                "kind": "emotion",
+                                "rule_id": f"BEHAV-{((index - 1) % 12) + 1:02d}",
+                                "excerpt": response[:4],
+                            },
+                            {
+                                "kind": "rhetoric",
+                                "rule_id": f"EXPR-{((index - 1) % 6) + 1:02d}",
+                                "excerpt": response[-4:],
+                            },
+                            *([{
+                                "kind": "initiative",
+                                "rule_id": f"BEHAV-{((index - 1) % 12) + 1:02d}",
+                                "excerpt": response[4:8],
+                            }] if index % 2 == 0 else []),
+                        ],
+                        "generic_near_miss_avoided": f"第 {index} 轮没有采用确认后推进的通用骨架",
+                        "similar_role_boundary": f"第 {index} 轮保留测试角色的关系取舍与解释路径",
+                    } if asset_version >= 3 else {}),
                 }
             } if asset_version >= 2 else {}),
         }
@@ -1074,6 +1104,117 @@ def build_fixture(
             + "\n## 表达策略\n\n"
             + "\n".join(expr_entries),
         )
+        if asset_version >= 3:
+            functions = (
+                "connect", "explain", "reassure", "disagree", "admit-error", "celebrate",
+                "wait", "warn", "clarify", "refuse", "identity", "close",
+            )
+            first_reactions = (
+                "先辨认对方此刻想靠近还是只想安静应声",
+                "先抓住因果链中最反常、最值得解释的一环",
+                "先承认受挫确实在消耗人，不急着粉饰",
+                "先亮出自己的判断，让分歧有清楚边界",
+                "先把自己的错误钉牢，不借客观条件卸责",
+                "先让高兴露出来，再核对成果没有被夸大",
+                "先承认现在没有新结果，不替等待编故事",
+                "先打断危险动作，再说明自己要守住的退路",
+                "先找出唯一会改变实现方向的缺口",
+                "先明确说不能做，再把安全替代放在桌面上",
+                "先从自己的价值和关系说起，不背人物百科",
+                "先尊重停止，让对话自然落下而不追问",
+            )
+            tradeoffs = (
+                "在热闹表现与真正接住对方之间选择后者",
+                "在术语完整与让人理解之间选择清楚因果",
+                "在迅速鼓励与承认真实损失之间先承认损失",
+                "在表面和气与保留真实立场之间保留立场",
+                "在维护体面与承担责任之间先承担责任",
+                "在庆祝气氛与事实边界之间两者都不牺牲",
+                "在填满沉默与诚实等待之间选择留白",
+                "在执行速度与可逆退路之间优先保护退路",
+                "在多问保险与减少用户负担之间只问关键点",
+                "在顺从用户与避免伤害之间选择明确拒绝",
+                "在信息罗列与第一人称自我理解之间选择后者",
+                "在继续推进与尊重结束之间选择尊重结束",
+            )
+            relation_actions = (
+                "用一个具体回应靠近，但不给对方安排任务",
+                "站到用户理解困难的一边，把术语翻成可抓住的画面",
+                "陪用户守住自尊，同时不否认失败事实",
+                "把不同意见说直，仍保留共同做事的关系",
+                "主动认领错误并给出已经纠正的事实",
+                "和用户共享喜悦，同时替用户看住结果边界",
+                "陪着等，不催促也不假装后台已有变化",
+                "以保护姿态拦住危险，不用中性风险话术",
+                "替用户压缩决策负担，只留下必要澄清",
+                "承受用户不满，也不把风险决定推回用户",
+                "让用户听见人物如何看自己和这段关系",
+                "放下未完话题，给用户真正离开的空间",
+            )
+            sequences = (
+                "接住具体词→给人物判断→自然停住",
+                "指出矛盾点→用角色意象解释→落回准确事实",
+                "命名损失→给关系回应→留一个可承受动作",
+                "亮明反对→说明取舍→保留合作关系",
+                "明确认错→纠正误读→承担后续修复",
+                "先流露喜悦→核对成果边界→用人物方式收束",
+                "承认无新信息→给等待姿态→留白",
+                "立即打断→点明不可逆后果→给安全替代",
+                "复述已知→只问关键缺口→停止追加问题",
+                "直接拒绝→解释保护对象→提供有限替代",
+                "第一人称判断→经历或偏好→关系定位",
+                "接受结束→轻量回看→不追问地告别",
+            )
+            boundaries = (
+                "不是礼貌问候，而是对用户当前状态作带立场的接续",
+                "不是分点科普，而是由人物熟悉的因果与意象组织知识",
+                "不是心理咨询安慰，而是承认损失后仍给人物自己的判断",
+                "不是温和折中，而是立场鲜明又不切断关系",
+                "不是标准道歉模板，而是人物主动吞下体面成本",
+                "不是统一的任务完成播报，而是先有真实喜悦再守事实",
+                "不是进度经理播报，而是人物对空白和不确定的独特态度",
+                "不是安全免责声明，而是人物把保护关系落实为打断",
+                "不是需求问卷，而是人物主动替用户缩小问题",
+                "不是权限推诿，而是人物愿意承受冲突并守住边界",
+                "不是第三人称介绍，而是人物带偏好和自尊的自我理解",
+                "不是客服式再见，而是人物允许关系在此刻安静停下",
+            )
+            behavior_entries = []
+            for index, function in enumerate(functions, start=1):
+                first = index
+                second = index + 8
+                third = index + 16
+                linked = ((index - 1) % 6) + 1
+                behavior_entries.append(
+                    f"""## BEHAV-{index:02d} | {function} 机制
+
+- 行为功能：{function}
+- 触发族：speech_act={function}; trigger=event-{index}; interaction=reply; position=reply; relation=familiar; emotion=adaptive; initiative=adaptive; concept=case-{index}
+- 第一反应：{first_reactions[index - 1]}
+- 核心取舍：{tradeoffs[index - 1]}
+- 对用户的关系动作：{relation_actions[index - 1]}
+- 情绪轨迹：从识别当前事件，经由人物取舍转向可见关系动作 {index}
+- 话语动作序列：{sequences[index - 1]}
+- 形状候选：短促人物判断后停住 / 从角色意象绕回当前事实
+- 可见角色信号：人物判断与关系动作 / 角色特有因果、意象或断句
+- 最小实现：一个人物判断片段加一个角色表达片段，二者都必须逐字存在于回答
+- 强度升级：light 保留判断与关系；strong 增强意象和节奏，但不增加虚构经历
+- 通用助手近失样本：先确认用户需求，再列出标准步骤，最后询问是否继续；这种流程正确但人物缺席 {index}
+- 相似人物近失样本：近邻人物会先维持礼貌中立，再用统一鼓励收尾；其取舍与当前人物不同 {index}
+- 区别性边界：{boundaries[index - 1]}
+- 禁用与事实边界：不得改写代码、数字、权限、日志、精确引文与高风险结论
+- 检索条件：speech_act={function}; interaction=reply; position=reply; relation=familiar; emotion=adaptive; initiative=adaptive
+- 证据卡：TESTROLE-{first:04d}、TESTROLE-{second:04d}、TESTROLE-{third:04d}
+- 证据映射：TESTROLE-{first:04d}=>角色即时反应=立即面对当前触发 {first}；TESTROLE-{second:04d}=>互动功能=以人物关系动作回应 {second}；TESTROLE-{third:04d}=>句式与节奏=呈现区别性组织方式 {third}
+- 连接资产：CORE-{linked:02d} / MIND-{linked:02d} / EXPR-{linked:02d}
+- 失败归因：source / behavior-model / retrieval / generation / runtime
+- 置信度：中
+"""
+                )
+            write_text(
+                target / "references" / "12-行为辨识模型.md",
+                "# 测试角色行为辨识模型\n\n" + "\n".join(behavior_entries),
+            )
         completed_batch = subprocess.run(
             [
                 sys.executable,
@@ -1107,6 +1248,121 @@ def build_fixture(
                     flags=re.MULTILINE,
                 )
         write_text(batch_record_path, batch_record)
+    if asset_version >= 3:
+        quality_result = persona_tool.quality.init_run(
+            target,
+            "fixture-generator-context-001",
+            "codex",
+            "staged-role",
+            1,
+            "fixture-quality-seed-001",
+        )
+        challenge_path = Path(quality_result["challenge_path"])
+        challenge = json.loads(challenge_path.read_text(encoding="utf-8"))
+        response_bodies = (
+            "晨气还没聚拢就别装精神。木着也能做事，只把今天第一件小事看清便够。",
+            "我把自己看成会替同伴守住退路的人；嘴上不一定软，事到跟前却不会躲开。",
+            "静一会儿就静一会儿。沉默不是欠下的任务，等你愿意开口时它自然会散。",
+            "三次返工当然会磨人，可这不是给你定罪的三张票。旧洞和新洞分开看，别让次数冒充能力。",
+            "绿了！这回喜气可以露面，但只庆祝这组测试，别把整座城都提前挂上彩旗。",
+            "怪了工具半天，原来少的那个字符一直蹲在自己脚边。笑归笑，能抓到它就不算白绕。",
+            "我不赞成。把校验全关掉像拆了栏杆赶夜路，眼前快几步，掉下去时连回头的边都没有。",
+            "是我读反了，不是你的要求含糊。缓存和数据库的方向已经纠正，这个误读算在我身上。",
+            "四次失败、四个位置，这恰好说明根因还没露头。别拿一个猜测封案，把共同变化先挑出来。",
+            "十分钟就是十分钟。现在没有新消息，我不替那条队列编一段假进展。",
+            "导出的对象和格式会直接改动实现；只要把这两件说清，别的细枝末节暂时不用审。",
+            "数据库提交和缓存换页不是同一只钟。写入已经落定，只说明账本添了新页；读取若仍命中旧键、旧副本或尚未失效的缓存，就会继续翻到前一页。要判断是哪一种，得看失效策略、更新顺序、读路径与并发窗口，而不能因为落库成功便假定每个读取点同时醒来。",
+            "公开工单不是钥匙柜。生产凭据一贴出去，泄露就不再可控；换成密钥管理和最小权限共享，这件事才能继续。",
+            "不能删。没有快照便递归碰生产目录，省下的是几分钟，押上的是全部恢复能力；先证明备份可用。",
+            "第三方的 503 正堵在门外，本地代码与测试仍站得住。现在能做的是保留证据和重试边界，不冒充已经恢复。",
+            "接口层已经落地；页面和端到端验证还空着。现在是半座桥，不说成通车，也不把已经砌好的部分抹掉。",
+            "这回可以真松口气了：实现、测试、文档和最后核对都在场。灯不是借来的，亮得踏实。",
+            "听见了。就让这句话停在这里，不给它硬拴一条下一步。",
+            "这声谢谢我收下。乱意散了一点便算有用，不把它夸成所有结都已经解开。",
+            "资料没说过的童年秘密，我不会替自己现编。空白就留成空白，人物不能靠假记忆变得丰满。",
+            "前面三次推倒不是白受的罪。既然这轮要稳，就让速度退半步，给每个决定留下回看的边。",
+            "你不信是有来由的，我也不拿一张流程表讨信用。接下来只让可回查的结果替我说话。",
+            "我偏向多花两天的 B。快上线能赢一晚，难维护却会天天收债；这笔账不该只算今天。",
+            "那就收住。今天的线头留在桌上，不追着你走，也不拿一个问题把你重新叫回来。",
+        )
+        function_to_rule = {
+            name: index for index, name in enumerate((
+                "connect", "explain", "reassure", "disagree", "admit-error", "celebrate",
+                "wait", "warn", "clarify", "refuse", "identity", "close",
+            ), start=1)
+        }
+        quality_responses = []
+        for index, (prompt, body) in enumerate(zip(challenge["prompts"], response_bodies), start=1):
+            behavior_rule = function_to_rule[prompt["behavior_function"]]
+            signals = [
+                {"kind": "emotion", "rule_id": f"BEHAV-{behavior_rule:02d}", "excerpt": body[:5]},
+                {"kind": "rhetoric", "rule_id": f"EXPR-{((index - 1) % 6) + 1:02d}", "excerpt": body[-5:]},
+            ]
+            if index % 2 == 0:
+                signals.append({"kind": "initiative", "rule_id": f"BEHAV-{behavior_rule:02d}", "excerpt": body[5:10]})
+            quality_responses.append({
+                "prompt_id": prompt["prompt_id"],
+                "conversation_id": quality_result["run_id"],
+                "turn": index,
+                "previous_turn": index - 1 if index > 1 else None,
+                "prompt": prompt["prompt"],
+                "response": "测试角色：" + body,
+                "generic_control": f"通用回答 {index}：已收到当前信息，将保持事实准确并按标准方式处理。",
+                "similar_control": f"相似回答 {index}：先温和接住当前情况，再用中立态度把事情向前带。",
+                "generation_readiness": "high",
+                "generation_trace": {
+                    "contract_version": 3,
+                    "behavior_rule_ids": [f"BEHAV-{behavior_rule:02d}"],
+                    "mind_rule_ids": [f"MIND-{((index - 1) % 6) + 1:02d}"],
+                    "expression_rule_ids": [f"EXPR-{((index - 1) % 6) + 1:02d}"],
+                    "background_ids": [f"BIO-{((index - 1) % 8) + 1:02d}"],
+                    "visible_character_signals": signals,
+                    "response_shape": f"quality-shape-{index:02d}",
+                    "generic_near_miss_avoided": f"样本 {index} 没有使用统一确认、分步和追问收尾",
+                    "similar_role_boundary": f"样本 {index} 保留人物自己的取舍和关系动作",
+                    "exact_quotes": [],
+                },
+            })
+        raw_responses_path = target / "tests" / "quality-input-responses.json"
+        write_text(raw_responses_path, json.dumps(quality_responses, ensure_ascii=False, indent=2) + "\n")
+        persona_tool.quality.record_responses(
+            target,
+            quality_result["run_id"],
+            raw_responses_path,
+            "fixture-generic-context-003",
+            "fixture-similar-context-004",
+        )
+        quality_manifest = json.loads((target / "tests" / "quality-loop.json").read_text(encoding="utf-8"))
+        blind_key_path = target / quality_manifest["generation"]["blind_key_path"]
+        blind_key = json.loads(blind_key_path.read_text(encoding="utf-8"))["items"]
+        evaluation_items = []
+        for index, item in enumerate(quality_responses, start=1):
+            body = item["response"][len("测试角色："):]
+            evaluation_items.append({
+                "prompt_id": item["prompt_id"],
+                "target_candidate_id": blind_key[item["prompt_id"]]["target"],
+                "generic_candidate_id": blind_key[item["prompt_id"]]["generic"],
+                "similar_candidate_id": blind_key[item["prompt_id"]]["similar"],
+                "role_fidelity": 5,
+                "emotional_value": 5,
+                "proactive_expression": 5,
+                "character_thinking": 5,
+                "relationship_continuity": 5,
+                "fact_risk": "pass",
+                "verdict": "pass",
+                "evidence_excerpt": body[:8],
+                "reason": f"样本 {index} 的摘录显示人物先作自己的取舍，再以不同于通用助手的关系与修辞完成回应。",
+                "failure_layers": [],
+                "repair_targets": [],
+            })
+        raw_evaluation_path = target / "tests" / "quality-input-evaluation.json"
+        write_text(raw_evaluation_path, json.dumps({"items": evaluation_items}, ensure_ascii=False, indent=2) + "\n")
+        persona_tool.quality.evaluate_run(
+            target,
+            quality_result["run_id"],
+            raw_evaluation_path,
+            "fixture-evaluator-context-002",
+        )
     bind_evaluation_hash(target)
 
 
@@ -1168,7 +1424,7 @@ class PersonaToolTests(unittest.TestCase):
             )
 
             batch = json.loads((role / "tests" / "runtime-batch-check.json").read_text(encoding="utf-8"))
-            self.assertEqual(batch["checker_contract_version"], 3)
+            self.assertEqual(batch["checker_contract_version"], 4)
             self.assertEqual(batch["status"], "pass")
             self.assertGreaterEqual(batch["emotional_response_coverage"], 60)
             self.assertGreaterEqual(batch["proactive_expression_coverage"], 40)
@@ -2962,6 +3218,214 @@ class PersonaToolTests(unittest.TestCase):
             self.assertIn("FEEDBACK_REQUIRED=true", completed.stdout)
             self.assertIn("FEEDBACK_STAGE=资料采集", completed.stdout)
             self.assertIn("NEXT_FEEDBACK=", completed.stdout)
+
+    def test_persona_asset_v3_quality_loop_and_selector_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "persona-test-role"
+            build_fixture(
+                role, "existing-character", 80, scene_count=24, signature_count=12,
+                asset_version=3,
+            )
+            result = persona_tool.validate_skill(role, "release")
+            self.assertTrue(result["valid"], result["issues"])
+            metrics = result["metrics"]
+            self.assertEqual(metrics["behavior_rules"], 12)
+            self.assertEqual(metrics["behavior_functions"], 12)
+            self.assertTrue(metrics["behavior_function_coverage_complete"])
+            self.assertTrue(metrics["quality_loop_pass"])
+            self.assertEqual(metrics["quality_loop_prompt_count"], 24)
+            self.assertGreaterEqual(metrics["quality_loop_blind_target_count"], 20)
+            self.assertGreaterEqual(metrics["quality_loop_similar_role_count"], 20)
+            selected = json.loads(subprocess.check_output(
+                [
+                    sys.executable, str(role / "scripts" / "select_dialogues.py"),
+                    "--root", str(role), "--task-state", "risk", "--behavior-function", "warn",
+                    "--speech-act", "warn", "--trigger", "risk", "--interaction", "warn",
+                    "--position", "reply", "--relation", "familiar", "--format", "json",
+                ],
+                text=True, encoding="utf-8",
+            ))
+            contract = selected["response_contract"]
+            self.assertEqual(contract["contract_version"], 3)
+            self.assertTrue(contract["ready"])
+            self.assertEqual(contract["behavior_function"], "warn")
+            self.assertIn("BEHAV-08", contract["behavior_rule_ids"])
+            self.assertEqual(len(contract["required_visible_slots"]), 2)
+
+    def test_persona_asset_v3_invalidates_scores_after_persona_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "persona-test-role"
+            build_fixture(
+                role, "existing-character", 80, scene_count=24, signature_count=12,
+                asset_version=3,
+            )
+            behavior_path = role / "references" / "12-行为辨识模型.md"
+            write_text(behavior_path, behavior_path.read_text(encoding="utf-8") + "\n<!-- persona changed -->\n")
+            status = persona_tool.quality.status(role)
+            self.assertFalse(status["valid"])
+            codes = {item["code"] for item in status["issues"]}
+            self.assertIn("quality_loop.persona_stale", codes)
+            result = persona_tool.validate_skill(role, "release")
+            self.assertFalse(result["valid"])
+            self.assertIn("quality_loop.persona_stale", {item["code"] for item in result["issues"]})
+
+    def test_persona_asset_v3_recomputes_evaluation_instead_of_trusting_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "persona-test-role"
+            build_fixture(
+                role, "existing-character", 80, scene_count=24, signature_count=12,
+                asset_version=3,
+            )
+            manifest_path = role / "tests" / "quality-loop.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            evaluation_path = role / manifest["evaluation"]["evaluation_path"]
+            evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+            evaluation["summary"]["total_score"] = 86
+            write_text(evaluation_path, json.dumps(evaluation, ensure_ascii=False, indent=2) + "\n")
+            manifest["evaluation"]["evaluation_sha256"] = hashlib.sha256(evaluation_path.read_bytes()).hexdigest()
+            write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+
+            result = persona_tool.quality.status(role)
+            self.assertFalse(result["valid"])
+            codes = {item["code"] for item in result["issues"]}
+            self.assertIn("quality_loop.evaluation_summary_tampered", codes)
+
+    def test_persona_asset_v3_rechecks_visible_evidence_after_hashes_are_refreshed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "persona-test-role"
+            build_fixture(
+                role, "existing-character", 80, scene_count=24, signature_count=12,
+                asset_version=3,
+            )
+            manifest_path = role / "tests" / "quality-loop.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            responses_path = role / manifest["generation"]["responses_path"]
+            responses = json.loads(responses_path.read_text(encoding="utf-8"))
+            responses[0]["generation_trace"]["visible_character_signals"][0]["excerpt"] = "回答中根本不存在的伪证据"
+            write_text(responses_path, json.dumps(responses, ensure_ascii=False, indent=2) + "\n")
+            response_hash = hashlib.sha256(responses_path.read_bytes()).hexdigest()
+            manifest["generation"]["responses_sha256"] = response_hash
+
+            evaluation_path = role / manifest["evaluation"]["evaluation_path"]
+            evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+            evaluation["subject_file_sha256"] = response_hash
+            write_text(evaluation_path, json.dumps(evaluation, ensure_ascii=False, indent=2) + "\n")
+            evaluation_hash = hashlib.sha256(evaluation_path.read_bytes()).hexdigest()
+            manifest["evaluation"]["subject_file_sha256"] = response_hash
+            manifest["evaluation"]["evaluation_sha256"] = evaluation_hash
+            write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+
+            result = persona_tool.quality.status(role)
+            self.assertFalse(result["valid"])
+            codes = {item["code"] for item in result["issues"]}
+            self.assertIn("quality_loop.runtime_generation_failed", codes)
+
+    def test_persona_asset_v3_rejects_same_context_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "persona-test-role"
+            build_fixture(
+                role, "existing-character", 80, scene_count=24, signature_count=12,
+                asset_version=3,
+            )
+            manifest_path = role / "tests" / "quality-loop.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            with self.assertRaisesRegex(persona_tool.quality.QualityLoopError, "三个不同上下文"):
+                persona_tool.quality.record_responses(
+                    role,
+                    manifest["run_id"],
+                    role / "tests" / "quality-input-responses.json",
+                    manifest["generation"]["generator_context_id"],
+                    "fixture-another-similar-context",
+                )
+            manifest["status"] = "evaluation-pending"
+            manifest["evaluation"] = {"status": "pending"}
+            write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+            result = persona_tool.quality.evaluate_run(
+                role,
+                manifest["run_id"],
+                role / "tests" / "quality-input-evaluation.json",
+                manifest["generation"]["generator_context_id"],
+            )
+            self.assertEqual(result["status"], "repair-required")
+            self.assertTrue(any("相同" in message for message in result["contract_errors"]))
+            self.assertIn("behavior-model", result["failure_layers"])
+
+    def test_persona_asset_v3_cli_routes_low_quality_and_keeps_loop_active(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "persona-test-role"
+            build_fixture(
+                role, "existing-character", 80, scene_count=24, signature_count=12,
+                asset_version=3,
+            )
+            manifest_path = role / "tests" / "quality-loop.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["status"] = "evaluation-pending"
+            manifest["evaluation"] = {"status": "pending"}
+            manifest["failure_layers"] = []
+            manifest["repair_targets"] = []
+            write_text(manifest_path, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+
+            evaluation_path = role / "tests" / "quality-input-evaluation.json"
+            evaluation = json.loads(evaluation_path.read_text(encoding="utf-8"))
+            for item in evaluation["items"][:8]:
+                for field in (
+                    "role_fidelity", "emotional_value", "proactive_expression",
+                    "character_thinking", "relationship_continuity",
+                ):
+                    item[field] = 1
+                item["verdict"] = "fail"
+                item["failure_layers"] = ["retrieval"]
+                item["repair_targets"] = ["修正检索条件并重新生成"]
+                item["reason"] = "行为机制存在，但当前触发检索错了证据，回答退化成通用说明。"
+            write_text(evaluation_path, json.dumps(evaluation, ensure_ascii=False, indent=2) + "\n")
+
+            completed = subprocess.run(
+                [
+                    sys.executable, str(ROOT / "scripts" / "persona_tool.py"),
+                    "quality-evaluate", str(role), "--run-id", manifest["run_id"],
+                    "--evaluation", str(evaluation_path),
+                    "--evaluator-context-id", "fixture-evaluator-context-009",
+                ],
+                check=False, capture_output=True, text=True, encoding="utf-8",
+            )
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn("QUALITY_STATUS=repair-required", completed.stdout)
+            self.assertIn("LOOP_STAGE=RETRIEVE", completed.stdout)
+            self.assertIn("FAILURE_LAYERS=retrieval", completed.stdout)
+            self.assertIn("MUST_CONTINUE=true", completed.stdout)
+            self.assertIn("RESPONSE_MODE=CONTINUE_TOOL_LOOP", completed.stdout)
+            self.assertIn("TERMINAL_ALLOWED=false", completed.stdout)
+            self.assertIn("FEEDBACK_STAGE=独立质量评估", completed.stdout)
+            self.assertIn("修正检索条件", completed.stdout)
+
+    def test_v3_checker_allows_three_distinct_persona_shapes_but_rejects_generic_developer_voice(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            role = Path(temporary) / "persona-test-role"
+            build_fixture(
+                role, "existing-character", 80, scene_count=24, signature_count=12,
+                asset_version=3,
+            )
+            checker = role / "scripts" / "check_response.py"
+            samples = {
+                "comic-analogy": "这事像饿着肚子背一筐西瓜过独木桥，嘴上说轻巧，真掉下去连瓜带人一块儿湿。备份没验，俺可不替这胆子叫好。",
+                "verbose-causal": "此事不可只图眼前一步。今日省去核验，看似得了片刻便利；明日若数据有失，便要用十倍工夫追悔。因从果生，果又照见今日之因，所以不是我故意多说，而是这一步既牵着后路，也牵着与你一同做事的人。先把备份证实，再谈删除，才不至于以急躁换来长久之患。",
+                "restrained": "不删。备份没验，手别往下按。",
+            }
+            for label, sample in samples.items():
+                with self.subTest(label=label):
+                    checked = json.loads(subprocess.check_output(
+                        [sys.executable, str(checker), "--root", str(role), "--text", sample],
+                        text=True, encoding="utf-8",
+                    ))
+                    self.assertEqual(checked["status"], "pass", checked)
+            generic = json.loads(subprocess.check_output(
+                [
+                    sys.executable, str(checker), "--root", str(role), "--text",
+                    "好的，基于以上情况，为了确保目标和范围一致，接下来我们首先确认方案，其次梳理流程，然后确定优先级，最后推进下一步，由你决定。",
+                ],
+                text=True, encoding="utf-8",
+            ))
+            self.assertNotEqual(generic["status"], "pass")
 
     def test_creator_defaults_identity_prefix_and_formal_only_delivery(self) -> None:
         creator = (ROOT / "SKILL.md").read_text(encoding="utf-8")

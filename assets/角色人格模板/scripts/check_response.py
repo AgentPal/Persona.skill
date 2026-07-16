@@ -13,9 +13,10 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 
-CHECKER_CONTRACT_VERSION = 3
+CHECKER_CONTRACT_VERSION = 4
 ANTI_HEADING_RE = re.compile(r"^###\s+(ANTI-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 EXPR_HEADING_RE = re.compile(r"^###\s+(EXPR-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
+BEHAV_HEADING_RE = re.compile(r"^##\s+(BEHAV-\d{2})\s+\|", re.MULTILINE | re.IGNORECASE)
 CARD_HEADING_RE = re.compile(r"^##\s+([A-Z0-9][A-Z0-9-]*-\d{4})\s*$", re.MULTILINE | re.IGNORECASE)
 AI_PHRASES = (
     "综合来看", "综上所述", "基于以上", "基于上述", "需要注意的是", "值得注意的是",
@@ -54,6 +55,9 @@ GENERIC_CONSULTING_PATTERNS = (
 )
 WORKFLOW_FRAME_RE = re.compile(r"先.{0,70}(?:再|然后|之后|我们|就能)|(?:先|再|然后|最后).*(?:先|再|然后|最后)")
 QUESTION_END_RE = re.compile(r"[？?][”’\"']?\s*$")
+ALLOWED_VISIBLE_SIGNAL_KINDS = {
+    "judgment", "emotion", "relationship", "rhetoric", "rhythm", "background", "initiative",
+}
 
 
 def read_text(path: Path) -> str:
@@ -137,6 +141,7 @@ def rule_and_background_ids(root: Path) -> tuple[set[str], set[str]]:
     for path in references.glob("*.md") if references.is_dir() else []:
         text = read_text(path)
         known_rules.update(rule_id for rule_id, _ in iter_blocks(text, EXPR_HEADING_RE))
+        known_rules.update(rule_id for rule_id, _ in iter_blocks(text, BEHAV_HEADING_RE))
         known_rules.update(rule_id for rule_id, _ in iter_blocks(text, ANTI_HEADING_RE))
         # CORE/VOICE/MICRO/MODE/MIND share the same stable heading convention;
         # keeping this local avoids importing the mother validator at runtime.
@@ -230,11 +235,19 @@ def analyze(text: str, root: Path, trace: dict[str, object] | None = None) -> di
     consulting_hits = unique_pattern_hits(prose, GENERIC_CONSULTING_PATTERNS)
     profiled_expression = bool((trace or {}).get("expression_rule_ids"))
     if len(consulting_hits) >= 2 or (
-        consulting_hits and WORKFLOW_FRAME_RE.search(prose) and not profiled_expression
+        consulting_hits
+        and WORKFLOW_FRAME_RE.search(prose)
+        and not profiled_expression
+        and not bool(profile["allows_extended_prose"])
     ):
         add_finding(findings, "generic_consulting_frame", 45, " / ".join(consulting_hits))
     elif consulting_hits:
-        add_finding(findings, "generic_consulting_tendency", 8 if profiled_expression else 14, consulting_hits[0])
+        profiled_long_form = bool(profile["allows_extended_prose"]) and len(prose) >= 80
+        add_finding(
+            findings, "generic_consulting_tendency",
+            8 if (profiled_expression or profiled_long_form) else 14,
+            consulting_hits[0],
+        )
 
     sequence_hits = unique_literal_hits(prose, SEQUENCE_MARKERS)
     if len(sequence_hits) >= 3:
@@ -271,7 +284,8 @@ def analyze(text: str, root: Path, trace: dict[str, object] | None = None) -> di
     # old runtime hooks while preserving strict validation whenever a trace
     # was actually requested.
     trace_contract_requested = trace is not None
-    if asset_version(root) >= 2 and trace_contract_requested:
+    current_asset_version = asset_version(root)
+    if current_asset_version >= 2 and trace_contract_requested:
         trace = trace or {}
         presence = trace.get("character_presence")
         if isinstance(presence, str):
@@ -282,6 +296,7 @@ def analyze(text: str, root: Path, trace: dict[str, object] | None = None) -> di
             presence_values = []
         mind_ids = [str(item) for item in trace.get("mind_rule_ids", [])] if isinstance(trace.get("mind_rule_ids"), list) else []
         expression_ids = [str(item) for item in trace.get("expression_rule_ids", [])] if isinstance(trace.get("expression_rule_ids"), list) else []
+        behavior_ids = [str(item) for item in trace.get("behavior_rule_ids", [])] if isinstance(trace.get("behavior_rule_ids"), list) else []
         known_rules, known_bio = rule_and_background_ids(root)
         # During an incomplete v2 build the strategy file may not exist yet;
         # the mother Skill will stop the build at validation, but the checker
@@ -292,7 +307,7 @@ def analyze(text: str, root: Path, trace: dict[str, object] | None = None) -> di
         strategy_ready = bool(strategy_text.strip()) and not re.search(r"\[待填写|\{\{[A-Z0-9_]+\}\}|\b(?:TODO|TBD)\b", strategy_text, re.IGNORECASE)
         if strategy_ready:
             unknown_rules = sorted(
-                item.upper() for item in (*mind_ids, *expression_ids)
+                item.upper() for item in (*mind_ids, *expression_ids, *behavior_ids)
                 if item.upper() not in known_rules
             )
             if unknown_rules:
@@ -302,7 +317,39 @@ def analyze(text: str, root: Path, trace: dict[str, object] | None = None) -> di
             unknown_bio = sorted(item.upper() for item in map(str, trace_background_ids) if item.upper() not in known_bio)
             if unknown_bio:
                 trace_findings.append({"code": "trace_background_id_unknown", "detail": "未知背景编号：" + " / ".join(unknown_bio)})
-        if not presence_values or not (mind_ids or expression_ids):
+        if current_asset_version >= 3:
+            if trace.get("contract_version") != 3:
+                trace_findings.append({"code": "trace_v3_contract_missing", "detail": "人物资产 v3 的 generation_trace.contract_version 必须为 3"})
+            if not behavior_ids:
+                trace_findings.append({"code": "behavior_contract_missing", "detail": "缺少 BEHAV 行为合同追溯"})
+            visible_signals = trace.get("visible_character_signals")
+            if not isinstance(visible_signals, list) or len(visible_signals) < 2:
+                trace_findings.append({"code": "visible_character_signals_low", "detail": "至少需要两个回答内可见角色信号"})
+                visible_signals = []
+            signal_kinds: set[str] = set()
+            for signal in visible_signals:
+                if not isinstance(signal, dict):
+                    trace_findings.append({"code": "visible_character_signal_invalid", "detail": "可见角色信号必须是对象"})
+                    continue
+                kind = str(signal.get("kind") or "").strip().lower()
+                excerpt = str(signal.get("excerpt") or "").strip()
+                rule_id = str(signal.get("rule_id") or "").strip().upper()
+                signal_kinds.add(kind)
+                if kind not in ALLOWED_VISIBLE_SIGNAL_KINDS:
+                    trace_findings.append({"code": "visible_character_signal_kind_invalid", "detail": f"未知信号类型：{kind or 'empty'}"})
+                if len(excerpt) < 2 or excerpt not in text:
+                    trace_findings.append({"code": "visible_character_signal_not_visible", "detail": f"信号片段未逐字出现在回答中：{excerpt or 'empty'}"})
+                if rule_id not in known_rules:
+                    trace_findings.append({"code": "visible_character_signal_rule_unknown", "detail": f"信号引用未知规则：{rule_id or 'empty'}"})
+            if not signal_kinds.intersection({"judgment", "emotion", "relationship", "initiative"}):
+                trace_findings.append({"code": "visible_character_stance_missing", "detail": "缺少人物判断、情绪、关系或主动性片段"})
+            if not signal_kinds.intersection({"rhetoric", "rhythm", "background"}):
+                trace_findings.append({"code": "visible_character_expression_missing", "detail": "缺少修辞、节奏或背景联想片段"})
+            if not str(trace.get("generic_near_miss_avoided") or "").strip():
+                trace_findings.append({"code": "generic_contrast_missing", "detail": "没有记录如何避开通用助手近失样本"})
+            if not str(trace.get("similar_role_boundary") or "").strip():
+                trace_findings.append({"code": "similar_role_boundary_missing", "detail": "没有记录目标人物与相似人物的区别性边界"})
+        elif not presence_values or not (mind_ids or expression_ids):
             trace_findings.append({"code": "character_presence_missing", "detail": "缺少人物判断、情绪或关系动作及其 MIND/EXPR 追溯"})
         exact_quotes = trace.get("exact_quotes", [])
         if exact_quotes and not isinstance(exact_quotes, list):
@@ -453,12 +500,39 @@ def analyze_batch(entries: Sequence[object], root: Path) -> dict[str, object]:
             60,
             f"{non_pass}/{len(texts)} 条单条检查未通过；正式批量验收不允许隐藏 review 或 fail 样本",
         )
-    v2 = asset_version(root) >= 2
+    current_asset_version = asset_version(root)
+    v2 = current_asset_version >= 2
+    v3 = current_asset_version >= 3
     valid_traces = [trace for trace in traces if isinstance(trace, dict)]
-    presence_count = sum(bool(trace.get("character_presence")) and bool(trace.get("mind_rule_ids") or trace.get("expression_rule_ids")) for trace in valid_traces)
-    emotional_count = sum(trace.get("emotional_response") is True for trace in valid_traces)
-    proactive_count = sum(trace.get("proactive_expression") is True for trace in valid_traces)
-    traceable_count = sum(bool(trace.get("mind_rule_ids") or trace.get("expression_rule_ids")) for trace in valid_traces)
+    def signal_kinds(trace: dict[str, object]) -> set[str]:
+        signals = trace.get("visible_character_signals")
+        if not isinstance(signals, list):
+            return set()
+        return {
+            str(item.get("kind") or "").strip().lower()
+            for item in signals if isinstance(item, dict)
+        }
+
+    if v3:
+        presence_count = sum(
+            bool(trace.get("behavior_rule_ids"))
+            and bool(signal_kinds(trace).intersection({"judgment", "emotion", "relationship", "initiative"}))
+            and bool(signal_kinds(trace).intersection({"rhetoric", "rhythm", "background"}))
+            for trace in valid_traces
+        )
+        emotional_count = sum(bool(signal_kinds(trace).intersection({"emotion", "relationship"})) for trace in valid_traces)
+        proactive_count = sum("initiative" in signal_kinds(trace) for trace in valid_traces)
+        traceable_count = sum(bool(trace.get("behavior_rule_ids")) for trace in valid_traces)
+    else:
+        presence_count = sum(bool(trace.get("character_presence")) and bool(trace.get("mind_rule_ids") or trace.get("expression_rule_ids")) for trace in valid_traces)
+        emotional_count = sum(trace.get("emotional_response") is True for trace in valid_traces)
+        proactive_count = sum(trace.get("proactive_expression") is True for trace in valid_traces)
+        traceable_count = sum(bool(trace.get("mind_rule_ids") or trace.get("expression_rule_ids")) for trace in valid_traces)
+    behavior_rule_ids = {
+        str(rule_id).upper()
+        for trace in valid_traces
+        for rule_id in (trace.get("behavior_rule_ids") if isinstance(trace.get("behavior_rule_ids"), list) else [])
+    }
     background_ids = [
         str(background_id)
         for trace in valid_traces
@@ -493,6 +567,11 @@ def analyze_batch(entries: Sequence[object], root: Path) -> dict[str, object]:
         add_finding(findings, "batch_length_adaptation_low", 45, f"篇幅适配覆盖 {length_coverage}% 低于 90%")
     if v2 and repeated_background_ids:
         add_finding(findings, "batch_background_callback_repeated", 35, " / ".join(f"{key}×{value}" for key, value in sorted(repeated_background_ids.items())))
+    if v3 and len(behavior_rule_ids) < 10:
+        add_finding(
+            findings, "batch_behavior_rule_coverage_low", 60,
+            f"实际连续对话只覆盖 {len(behavior_rule_ids)} 个 BEHAV 机制，至少需要 10 个",
+        )
     score = min(100, sum(int(item["weight"]) for item in findings))
     status = "pass" if score < 40 else ("review" if score < 60 else "fail")
     return {
@@ -512,6 +591,8 @@ def analyze_batch(entries: Sequence[object], root: Path) -> dict[str, object]:
         "emotional_response_coverage": emotional_coverage,
         "proactive_expression_coverage": proactive_coverage,
         "traceability_coverage": traceability_coverage,
+        "behavior_rule_coverage_count": len(behavior_rule_ids),
+        "behavior_rule_ids": sorted(behavior_rule_ids),
         "length_adaptation_coverage": length_coverage,
         "background_callback_count": len(background_ids),
         "repeated_background_ids": repeated_background_ids,
